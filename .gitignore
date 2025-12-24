@@ -1,0 +1,9 @@
+# Go
+/backend/bin/
+
+# Xcode
+DerivedData/
+*.xcuserstate
+
+# macOS
+.DS_Store
