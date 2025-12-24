@@ -1,35 +1,20 @@
 package config
 
 import (
-	"errors"
-	"os"
-	"strconv"
+	"github.com/caarlos0/env/v10"
+	"github.com/joho/godotenv"
 )
 
 type Config struct {
-	DatabaseURL string
-	Port        int
+	DatabaseURL string `env:"DATABASE_URL,required"`
+	Port        int    `env:"PORT" envDefault:"8080"`
 }
 
 func Load() (Config, error) {
-	_ = loadDotEnv(".env")
-
-	cfg := Config{
-		DatabaseURL: os.Getenv("DATABASE_URL"),
-		Port:        8080,
+	_ = godotenv.Load()
+	var cfg Config
+	if err := env.Parse(&cfg); err != nil {
+		return Config{}, err
 	}
-
-	if cfg.DatabaseURL == "" {
-		return Config{}, errors.New("DATABASE_URL is required")
-	}
-
-	if portStr := os.Getenv("PORT"); portStr != "" {
-		port, err := strconv.Atoi(portStr)
-		if err != nil {
-			return Config{}, err
-		}
-		cfg.Port = port
-	}
-
 	return cfg, nil
 }
