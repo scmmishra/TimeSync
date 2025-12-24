@@ -14,15 +14,20 @@ import (
 	"timesync/backend/internal/sqlc"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type stubStore struct {
-	querier sqlc.Querier
+	querier   sqlc.Querier
+	beginTxFn func(context.Context, pgx.TxOptions) (pgx.Tx, error)
 }
 
 func (s *stubStore) BeginTx(ctx context.Context, opts pgx.TxOptions) (pgx.Tx, error) {
-	return nil, errors.New("BeginTx not implemented")
+	if s.beginTxFn == nil {
+		return nil, errors.New("BeginTx not implemented")
+	}
+	return s.beginTxFn(ctx, opts)
 }
 
 func (s *stubStore) Querier() sqlc.Querier {
@@ -48,16 +53,29 @@ func (m *stubMailer) SendVerificationCode(_ context.Context, email, code string)
 }
 
 type stubQuerier struct {
-	createEmailVerificationCodeFn func(context.Context, sqlc.CreateEmailVerificationCodeParams) (sqlc.EmailVerificationCode, error)
-	getAuthSessionByRefreshHashFn func(context.Context, sqlc.GetAuthSessionByRefreshHashParams) (sqlc.AuthSession, error)
-	rotateAuthSessionFn           func(context.Context, sqlc.RotateAuthSessionParams) error
+	countTeamMembersFn            func(context.Context, pgtype.UUID) (int64, error)
 	createAuthSessionFn           func(context.Context, sqlc.CreateAuthSessionParams) (sqlc.AuthSession, error)
+	createEmailVerificationCodeFn func(context.Context, sqlc.CreateEmailVerificationCodeParams) (sqlc.EmailVerificationCode, error)
+	createTeamFn                  func(context.Context, sqlc.CreateTeamParams) (sqlc.Team, error)
+	createTeamMembershipFn        func(context.Context, sqlc.CreateTeamMembershipParams) error
+	createUserFn                  func(context.Context, sqlc.CreateUserParams) (sqlc.User, error)
+	getAuthSessionByRefreshHashFn func(context.Context, sqlc.GetAuthSessionByRefreshHashParams) (sqlc.AuthSession, error)
+	getEmailVerificationCodeFn    func(context.Context, sqlc.GetEmailVerificationCodeParams) (sqlc.EmailVerificationCode, error)
+	getTeamByDomainFn             func(context.Context, string) (sqlc.Team, error)
+	getTeamMembershipFn           func(context.Context, sqlc.GetTeamMembershipParams) (sqlc.TeamMembership, error)
+	getUserByEmailFn              func(context.Context, string) (sqlc.User, error)
 	markAuthSessionUsedFn         func(context.Context, sqlc.MarkAuthSessionUsedParams) error
+	markEmailVerificationCodeFn   func(context.Context, sqlc.MarkEmailVerificationCodeUsedParams) error
 	revokeAuthSessionFn           func(context.Context, sqlc.RevokeAuthSessionParams) error
+	rotateAuthSessionFn           func(context.Context, sqlc.RotateAuthSessionParams) error
+	updateUserVerifiedAtFn        func(context.Context, sqlc.UpdateUserVerifiedAtParams) (sqlc.User, error)
 }
 
-func (s stubQuerier) CountTeamMembers(context.Context, pgtype.UUID) (int64, error) {
-	panic("unexpected CountTeamMembers")
+func (s stubQuerier) CountTeamMembers(ctx context.Context, teamID pgtype.UUID) (int64, error) {
+	if s.countTeamMembersFn == nil {
+		panic("unexpected CountTeamMembers")
+	}
+	return s.countTeamMembersFn(ctx, teamID)
 }
 
 func (s stubQuerier) CreateAuthSession(ctx context.Context, arg sqlc.CreateAuthSessionParams) (sqlc.AuthSession, error) {
@@ -74,16 +92,25 @@ func (s stubQuerier) CreateEmailVerificationCode(ctx context.Context, arg sqlc.C
 	return s.createEmailVerificationCodeFn(ctx, arg)
 }
 
-func (s stubQuerier) CreateTeam(context.Context, sqlc.CreateTeamParams) (sqlc.Team, error) {
-	panic("unexpected CreateTeam")
+func (s stubQuerier) CreateTeam(ctx context.Context, arg sqlc.CreateTeamParams) (sqlc.Team, error) {
+	if s.createTeamFn == nil {
+		panic("unexpected CreateTeam")
+	}
+	return s.createTeamFn(ctx, arg)
 }
 
-func (s stubQuerier) CreateTeamMembership(context.Context, sqlc.CreateTeamMembershipParams) error {
-	panic("unexpected CreateTeamMembership")
+func (s stubQuerier) CreateTeamMembership(ctx context.Context, arg sqlc.CreateTeamMembershipParams) error {
+	if s.createTeamMembershipFn == nil {
+		panic("unexpected CreateTeamMembership")
+	}
+	return s.createTeamMembershipFn(ctx, arg)
 }
 
-func (s stubQuerier) CreateUser(context.Context, sqlc.CreateUserParams) (sqlc.User, error) {
-	panic("unexpected CreateUser")
+func (s stubQuerier) CreateUser(ctx context.Context, arg sqlc.CreateUserParams) (sqlc.User, error) {
+	if s.createUserFn == nil {
+		panic("unexpected CreateUser")
+	}
+	return s.createUserFn(ctx, arg)
 }
 
 func (s stubQuerier) GetAuthSessionByAccessHash(context.Context, sqlc.GetAuthSessionByAccessHashParams) (sqlc.AuthSession, error) {
@@ -97,20 +124,32 @@ func (s stubQuerier) GetAuthSessionByRefreshHash(ctx context.Context, arg sqlc.G
 	return s.getAuthSessionByRefreshHashFn(ctx, arg)
 }
 
-func (s stubQuerier) GetEmailVerificationCode(context.Context, sqlc.GetEmailVerificationCodeParams) (sqlc.EmailVerificationCode, error) {
-	panic("unexpected GetEmailVerificationCode")
+func (s stubQuerier) GetEmailVerificationCode(ctx context.Context, arg sqlc.GetEmailVerificationCodeParams) (sqlc.EmailVerificationCode, error) {
+	if s.getEmailVerificationCodeFn == nil {
+		panic("unexpected GetEmailVerificationCode")
+	}
+	return s.getEmailVerificationCodeFn(ctx, arg)
 }
 
-func (s stubQuerier) GetTeamByDomain(context.Context, string) (sqlc.Team, error) {
-	panic("unexpected GetTeamByDomain")
+func (s stubQuerier) GetTeamByDomain(ctx context.Context, domain string) (sqlc.Team, error) {
+	if s.getTeamByDomainFn == nil {
+		panic("unexpected GetTeamByDomain")
+	}
+	return s.getTeamByDomainFn(ctx, domain)
 }
 
-func (s stubQuerier) GetTeamMembership(context.Context, sqlc.GetTeamMembershipParams) (sqlc.TeamMembership, error) {
-	panic("unexpected GetTeamMembership")
+func (s stubQuerier) GetTeamMembership(ctx context.Context, arg sqlc.GetTeamMembershipParams) (sqlc.TeamMembership, error) {
+	if s.getTeamMembershipFn == nil {
+		panic("unexpected GetTeamMembership")
+	}
+	return s.getTeamMembershipFn(ctx, arg)
 }
 
-func (s stubQuerier) GetUserByEmail(context.Context, string) (sqlc.User, error) {
-	panic("unexpected GetUserByEmail")
+func (s stubQuerier) GetUserByEmail(ctx context.Context, email string) (sqlc.User, error) {
+	if s.getUserByEmailFn == nil {
+		panic("unexpected GetUserByEmail")
+	}
+	return s.getUserByEmailFn(ctx, email)
 }
 
 func (s stubQuerier) GetUserByID(context.Context, pgtype.UUID) (sqlc.User, error) {
@@ -124,8 +163,11 @@ func (s stubQuerier) MarkAuthSessionUsed(ctx context.Context, arg sqlc.MarkAuthS
 	return s.markAuthSessionUsedFn(ctx, arg)
 }
 
-func (s stubQuerier) MarkEmailVerificationCodeUsed(context.Context, sqlc.MarkEmailVerificationCodeUsedParams) error {
-	panic("unexpected MarkEmailVerificationCodeUsed")
+func (s stubQuerier) MarkEmailVerificationCodeUsed(ctx context.Context, arg sqlc.MarkEmailVerificationCodeUsedParams) error {
+	if s.markEmailVerificationCodeFn == nil {
+		panic("unexpected MarkEmailVerificationCodeUsed")
+	}
+	return s.markEmailVerificationCodeFn(ctx, arg)
 }
 
 func (s stubQuerier) RevokeAuthSession(ctx context.Context, arg sqlc.RevokeAuthSessionParams) error {
@@ -142,9 +184,41 @@ func (s stubQuerier) RotateAuthSession(ctx context.Context, arg sqlc.RotateAuthS
 	return s.rotateAuthSessionFn(ctx, arg)
 }
 
-func (s stubQuerier) UpdateUserVerifiedAt(context.Context, sqlc.UpdateUserVerifiedAtParams) (sqlc.User, error) {
-	panic("unexpected UpdateUserVerifiedAt")
+func (s stubQuerier) UpdateUserVerifiedAt(ctx context.Context, arg sqlc.UpdateUserVerifiedAtParams) (sqlc.User, error) {
+	if s.updateUserVerifiedAtFn == nil {
+		panic("unexpected UpdateUserVerifiedAt")
+	}
+	return s.updateUserVerifiedAtFn(ctx, arg)
 }
+
+type testTx struct {
+	committed bool
+	rolled    bool
+}
+
+func (t *testTx) Begin(context.Context) (pgx.Tx, error) { return t, nil }
+func (t *testTx) Commit(context.Context) error {
+	t.committed = true
+	return nil
+}
+func (t *testTx) Rollback(context.Context) error {
+	t.rolled = true
+	return nil
+}
+func (t *testTx) CopyFrom(context.Context, pgx.Identifier, []string, pgx.CopyFromSource) (int64, error) {
+	return 0, nil
+}
+func (t *testTx) SendBatch(context.Context, *pgx.Batch) pgx.BatchResults { return nil }
+func (t *testTx) LargeObjects() pgx.LargeObjects                         { return pgx.LargeObjects{} }
+func (t *testTx) Prepare(context.Context, string, string) (*pgconn.StatementDescription, error) {
+	return nil, nil
+}
+func (t *testTx) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, nil
+}
+func (t *testTx) Query(context.Context, string, ...any) (pgx.Rows, error) { return nil, nil }
+func (t *testTx) QueryRow(context.Context, string, ...any) pgx.Row        { return nil }
+func (t *testTx) Conn() *pgx.Conn                                         { return nil }
 
 func TestHandleRequestCodeInvalidJSON(t *testing.T) {
 	api := New(&stubStore{}, &mailer.LogMailer{}, Settings{}, nil)
@@ -193,6 +267,135 @@ func TestHandleRequestCodeSuccess(t *testing.T) {
 	}
 	if m.calls != 1 {
 		t.Fatalf("expected mailer to be called once, got %d", m.calls)
+	}
+}
+
+func TestHandleVerifyCodeSuccess(t *testing.T) {
+	email := "user@example.com"
+	code := "ABCD2345"
+	deviceID := "device-123"
+	now := time.Date(2024, 1, 2, 9, 0, 0, 0, time.UTC)
+	tx := &testTx{}
+	var membershipRole string
+
+	q := stubQuerier{
+		getEmailVerificationCodeFn: func(_ context.Context, arg sqlc.GetEmailVerificationCodeParams) (sqlc.EmailVerificationCode, error) {
+			if arg.Email != email || arg.Code != code {
+				t.Fatalf("unexpected email/code: %q/%q", arg.Email, arg.Code)
+			}
+			if !arg.ExpiresAt.Valid || !arg.ExpiresAt.Time.Equal(now) {
+				t.Fatalf("unexpected expires at: %v", arg.ExpiresAt.Time)
+			}
+			return sqlc.EmailVerificationCode{ID: pgtype.UUID{Bytes: [16]byte{1}, Valid: true}}, nil
+		},
+		markEmailVerificationCodeFn: func(_ context.Context, arg sqlc.MarkEmailVerificationCodeUsedParams) error {
+			if !arg.UsedAt.Valid || !arg.UsedAt.Time.Equal(now) {
+				t.Fatalf("unexpected used at: %v", arg.UsedAt.Time)
+			}
+			return nil
+		},
+		getUserByEmailFn: func(context.Context, string) (sqlc.User, error) {
+			return sqlc.User{}, pgx.ErrNoRows
+		},
+		createUserFn: func(_ context.Context, arg sqlc.CreateUserParams) (sqlc.User, error) {
+			if arg.Email != email {
+				t.Fatalf("unexpected email: %q", arg.Email)
+			}
+			return sqlc.User{ID: pgtype.UUID{Bytes: [16]byte{2}, Valid: true}, Email: arg.Email}, nil
+		},
+		getTeamByDomainFn: func(context.Context, string) (sqlc.Team, error) {
+			return sqlc.Team{}, pgx.ErrNoRows
+		},
+		createTeamFn: func(_ context.Context, arg sqlc.CreateTeamParams) (sqlc.Team, error) {
+			return sqlc.Team{ID: pgtype.UUID{Bytes: [16]byte{3}, Valid: true}, Domain: arg.Domain, Name: arg.Name}, nil
+		},
+		getTeamMembershipFn: func(context.Context, sqlc.GetTeamMembershipParams) (sqlc.TeamMembership, error) {
+			return sqlc.TeamMembership{}, pgx.ErrNoRows
+		},
+		countTeamMembersFn: func(context.Context, pgtype.UUID) (int64, error) {
+			return 0, nil
+		},
+		createTeamMembershipFn: func(_ context.Context, arg sqlc.CreateTeamMembershipParams) error {
+			membershipRole = arg.Role
+			return nil
+		},
+		createAuthSessionFn: func(_ context.Context, arg sqlc.CreateAuthSessionParams) (sqlc.AuthSession, error) {
+			if !arg.AccessExpiresAt.Valid || !arg.RefreshExpiresAt.Valid {
+				t.Fatal("expected expires to be set")
+			}
+			return sqlc.AuthSession{}, nil
+		},
+	}
+
+	api := New(&stubStore{
+		querier: q,
+		beginTxFn: func(context.Context, pgx.TxOptions) (pgx.Tx, error) {
+			return tx, nil
+		},
+	}, &mailer.LogMailer{}, Settings{
+		AccessTTL:              15 * time.Minute,
+		RefreshTTL:             24 * time.Hour,
+		CodeTTL:                10 * time.Minute,
+		VerifyCodeEmailLimit:   5,
+		VerifyCodeEmailWindow:  15 * time.Minute,
+		VerifyCodeLock:         15 * time.Minute,
+		TeamSizeLimit:          30,
+		RequestCodeEmailLimit:  1,
+		RequestCodeEmailWindow: time.Minute,
+	}, nil)
+	api.clock = func() time.Time { return now }
+
+	body, _ := json.Marshal(verifyCodeRequest{Email: email, Code: code})
+	req := httptest.NewRequest(http.MethodPost, "/auth/verify-code", bytes.NewReader(body))
+	req.Header.Set("X-Device-Id", deviceID)
+	rec := httptest.NewRecorder()
+
+	api.handleVerifyCode(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+	if membershipRole != "admin" {
+		t.Fatalf("expected admin role, got %q", membershipRole)
+	}
+	if !tx.committed {
+		t.Fatal("expected tx to be committed")
+	}
+}
+
+func TestHandleVerifyCodeInvalidCode(t *testing.T) {
+	email := "user@example.com"
+	code := "ABCD2345"
+	deviceID := "device-123"
+	now := time.Now()
+
+	q := stubQuerier{
+		getEmailVerificationCodeFn: func(context.Context, sqlc.GetEmailVerificationCodeParams) (sqlc.EmailVerificationCode, error) {
+			return sqlc.EmailVerificationCode{}, pgx.ErrNoRows
+		},
+	}
+
+	api := New(&stubStore{
+		querier: q,
+		beginTxFn: func(context.Context, pgx.TxOptions) (pgx.Tx, error) {
+			return &testTx{}, nil
+		},
+	}, &mailer.LogMailer{}, Settings{
+		VerifyCodeEmailLimit:  5,
+		VerifyCodeEmailWindow: 15 * time.Minute,
+		VerifyCodeLock:        15 * time.Minute,
+	}, nil)
+	api.clock = func() time.Time { return now }
+
+	body, _ := json.Marshal(verifyCodeRequest{Email: email, Code: code})
+	req := httptest.NewRequest(http.MethodPost, "/auth/verify-code", bytes.NewReader(body))
+	req.Header.Set("X-Device-Id", deviceID)
+	rec := httptest.NewRecorder()
+
+	api.handleVerifyCode(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected status 401, got %d", rec.Code)
 	}
 }
 
