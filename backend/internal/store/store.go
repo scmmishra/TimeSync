@@ -6,12 +6,25 @@ import (
 
 	"timesync/backend/internal/sqlc"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type Store struct {
 	Pool    *pgxpool.Pool
 	Queries *sqlc.Queries
+}
+
+func (s *Store) BeginTx(ctx context.Context, opts pgx.TxOptions) (pgx.Tx, error) {
+	return s.Pool.BeginTx(ctx, opts)
+}
+
+func (s *Store) Querier() sqlc.Querier {
+	return s.Queries
+}
+
+func (s *Store) WithTx(tx pgx.Tx) sqlc.Querier {
+	return s.Queries.WithTx(tx)
 }
 
 func Open(ctx context.Context, databaseURL string) (*Store, error) {

@@ -1,16 +1,18 @@
 package httpapi
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"time"
 
 	"timesync/backend/internal/mailer"
-	"timesync/backend/internal/store"
+	"timesync/backend/internal/sqlc"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/httprate"
+	"github.com/jackc/pgx/v5"
 )
 
 type Settings struct {
@@ -33,7 +35,7 @@ type Settings struct {
 }
 
 type API struct {
-	store      *store.Store
+	store      Store
 	mailer     mailer.Mailer
 	logger     *slog.Logger
 	settings   Settings
@@ -42,7 +44,13 @@ type API struct {
 	failLimit  *attemptTracker
 }
 
-func New(store *store.Store, mailer mailer.Mailer, settings Settings, logger *slog.Logger) *API {
+type Store interface {
+	BeginTx(ctx context.Context, opts pgx.TxOptions) (pgx.Tx, error)
+	Querier() sqlc.Querier
+	WithTx(tx pgx.Tx) sqlc.Querier
+}
+
+func New(store Store, mailer mailer.Mailer, settings Settings, logger *slog.Logger) *API {
 	if logger == nil {
 		logger = slog.Default()
 	}

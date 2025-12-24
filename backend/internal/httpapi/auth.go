@@ -77,7 +77,7 @@ func (a *API) handleRequestCode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	expiresAt := now.Add(a.settings.CodeTTL)
-	_, err = a.store.Queries.CreateEmailVerificationCode(r.Context(), sqlc.CreateEmailVerificationCodeParams{
+	_, err = a.store.Querier().CreateEmailVerificationCode(r.Context(), sqlc.CreateEmailVerificationCodeParams{
 		Email:     email,
 		Code:      code,
 		ExpiresAt: toTimestamptz(expiresAt),
@@ -127,14 +127,14 @@ func (a *API) handleVerifyCode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	tx, err := a.store.Pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := a.store.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to start transaction")
 		return
 	}
 	defer tx.Rollback(ctx)
 
-	q := a.store.Queries.WithTx(tx)
+	q := a.store.WithTx(tx)
 	codeRow, err := q.GetEmailVerificationCode(ctx, sqlc.GetEmailVerificationCodeParams{
 		Email:     email,
 		Code:      code,
@@ -261,7 +261,8 @@ func (a *API) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := a.clock()
-	session, err := a.store.Queries.GetAuthSessionByRefreshHash(r.Context(), sqlc.GetAuthSessionByRefreshHashParams{
+	q := a.store.Querier()
+	session, err := q.GetAuthSessionByRefreshHash(r.Context(), sqlc.GetAuthSessionByRefreshHashParams{
 		RefreshTokenHash: hashString(refreshToken),
 		RefreshExpiresAt: toTimestamptz(now),
 	})
@@ -281,7 +282,7 @@ func (a *API) handleRefresh(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		if err := a.store.Queries.RotateAuthSession(r.Context(), sqlc.RotateAuthSessionParams{
+		if err := q.RotateAuthSession(r.Context(), sqlc.RotateAuthSessionParams{
 			ID:        session.ID,
 			RotatedAt: toTimestamptz(now),
 		}); err != nil {
@@ -304,7 +305,7 @@ func (a *API) handleRefresh(w http.ResponseWriter, r *http.Request) {
 
 	accessExpires := now.Add(a.settings.AccessTTL)
 	refreshExpires := now.Add(a.settings.RefreshTTL)
-	_, err = a.store.Queries.CreateAuthSession(r.Context(), sqlc.CreateAuthSessionParams{
+	_, err = q.CreateAuthSession(r.Context(), sqlc.CreateAuthSessionParams{
 		UserID:           session.UserID,
 		DeviceIDHash:     session.DeviceIDHash,
 		AccessTokenHash:  accessHash,
@@ -317,7 +318,7 @@ func (a *API) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.store.Queries.MarkAuthSessionUsed(r.Context(), sqlc.MarkAuthSessionUsedParams{
+	if err := q.MarkAuthSessionUsed(r.Context(), sqlc.MarkAuthSessionUsedParams{
 		ID:         session.ID,
 		LastUsedAt: toTimestamptz(now),
 	}); err != nil {
@@ -352,7 +353,8 @@ func (a *API) handleLogout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := a.clock()
-	session, err := a.store.Queries.GetAuthSessionByRefreshHash(r.Context(), sqlc.GetAuthSessionByRefreshHashParams{
+	q := a.store.Querier()
+	session, err := q.GetAuthSessionByRefreshHash(r.Context(), sqlc.GetAuthSessionByRefreshHashParams{
 		RefreshTokenHash: hashString(refreshToken),
 		RefreshExpiresAt: toTimestamptz(now),
 	})
@@ -366,7 +368,7 @@ func (a *API) handleLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.store.Queries.RevokeAuthSession(r.Context(), sqlc.RevokeAuthSessionParams{
+	if err := q.RevokeAuthSession(r.Context(), sqlc.RevokeAuthSessionParams{
 		ID:        session.ID,
 		RevokedAt: toTimestamptz(now),
 	}); err != nil {
@@ -425,7 +427,7 @@ func hashEqual(a, b []byte) bool {
 
 var errTeamFull = errors.New("team is full")
 
-func getOrCreateUser(ctx context.Context, q *sqlc.Queries, email, domain string, now time.Time) (sqlc.User, bool, error) {
+func getOrCreateUser(ctx context.Context, q sqlc.Querier, email, domain string, now time.Time) (sqlc.User, bool, error) {
 	user, err := q.GetUserByEmail(ctx, email)
 	if err == nil {
 		if !user.EmailVerifiedAt.Valid {
@@ -453,7 +455,7 @@ func getOrCreateUser(ctx context.Context, q *sqlc.Queries, email, domain string,
 	return user, true, nil
 }
 
-func getOrCreateTeam(ctx context.Context, q *sqlc.Queries, domain string) (sqlc.Team, bool, error) {
+func getOrCreateTeam(ctx context.Context, q sqlc.Querier, domain string) (sqlc.Team, bool, error) {
 	team, err := q.GetTeamByDomain(ctx, domain)
 	if err == nil {
 		return team, false, nil
@@ -471,7 +473,7 @@ func getOrCreateTeam(ctx context.Context, q *sqlc.Queries, domain string) (sqlc.
 	return team, true, nil
 }
 
-func ensureMembership(ctx context.Context, q *sqlc.Queries, user sqlc.User, team sqlc.Team, isNewUser, createdTeam bool, now time.Time, teamSizeLimit int) (string, error) {
+func ensureMembership(ctx context.Context, q sqlc.Querier, user sqlc.User, team sqlc.Team, isNewUser, createdTeam bool, now time.Time, teamSizeLimit int) (string, error) {
 	membership, err := q.GetTeamMembership(ctx, sqlc.GetTeamMembershipParams{
 		TeamID: team.ID,
 		UserID: user.ID,
