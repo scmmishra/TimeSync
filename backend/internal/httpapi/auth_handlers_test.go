@@ -270,6 +270,57 @@ func TestHandleRequestCodeSuccess(t *testing.T) {
 	}
 }
 
+func TestHandleRequestCodeMailerFailure(t *testing.T) {
+	q := stubQuerier{
+		createEmailVerificationCodeFn: func(context.Context, sqlc.CreateEmailVerificationCodeParams) (sqlc.EmailVerificationCode, error) {
+			return sqlc.EmailVerificationCode{}, nil
+		},
+	}
+	m := &stubMailer{err: errors.New("smtp down")}
+	api := New(&stubStore{querier: q}, m, Settings{
+		CodeTTL:                10 * time.Minute,
+		RequestCodeEmailLimit:  3,
+		RequestCodeEmailWindow: time.Minute,
+	}, nil)
+
+	body, _ := json.Marshal(requestCodeRequest{Email: "user@example.com"})
+	req := httptest.NewRequest(http.MethodPost, "/auth/request-code", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	api.handleRequestCode(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", rec.Code)
+	}
+}
+
+func TestHandleRequestCodeRateLimited(t *testing.T) {
+	q := stubQuerier{
+		createEmailVerificationCodeFn: func(context.Context, sqlc.CreateEmailVerificationCodeParams) (sqlc.EmailVerificationCode, error) {
+			return sqlc.EmailVerificationCode{}, nil
+		},
+	}
+	m := &stubMailer{}
+	api := New(&stubStore{querier: q}, m, Settings{
+		CodeTTL:                10 * time.Minute,
+		RequestCodeEmailLimit:  1,
+		RequestCodeEmailWindow: time.Hour,
+	}, nil)
+
+	body, _ := json.Marshal(requestCodeRequest{Email: "user@example.com"})
+	req := httptest.NewRequest(http.MethodPost, "/auth/request-code", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	api.handleRequestCode(rec, req)
+
+	req2 := httptest.NewRequest(http.MethodPost, "/auth/request-code", bytes.NewReader(body))
+	rec2 := httptest.NewRecorder()
+	api.handleRequestCode(rec2, req2)
+
+	if rec2.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected status 429, got %d", rec2.Code)
+	}
+}
+
 func TestHandleVerifyCodeSuccess(t *testing.T) {
 	email := "user@example.com"
 	code := "ABCD2345"
@@ -399,6 +450,42 @@ func TestHandleVerifyCodeInvalidCode(t *testing.T) {
 	}
 }
 
+func TestHandleVerifyCodeLockedAfterFailures(t *testing.T) {
+	email := "user@example.com"
+	code := "ABCD2345"
+	deviceID := "device-123"
+	now := time.Now()
+
+	q := stubQuerier{
+		getEmailVerificationCodeFn: func(context.Context, sqlc.GetEmailVerificationCodeParams) (sqlc.EmailVerificationCode, error) {
+			return sqlc.EmailVerificationCode{}, pgx.ErrNoRows
+		},
+	}
+
+	api := New(&stubStore{
+		querier: q,
+		beginTxFn: func(context.Context, pgx.TxOptions) (pgx.Tx, error) {
+			return &testTx{}, nil
+		},
+	}, &mailer.LogMailer{}, Settings{
+		VerifyCodeEmailLimit:  1,
+		VerifyCodeEmailWindow: 15 * time.Minute,
+		VerifyCodeLock:        15 * time.Minute,
+	}, nil)
+	api.clock = func() time.Time { return now }
+
+	body, _ := json.Marshal(verifyCodeRequest{Email: email, Code: code})
+	req := httptest.NewRequest(http.MethodPost, "/auth/verify-code", bytes.NewReader(body))
+	req.Header.Set("X-Device-Id", deviceID)
+	rec := httptest.NewRecorder()
+
+	api.handleVerifyCode(rec, req)
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected status 429, got %d", rec.Code)
+	}
+}
+
 func TestHandleRefreshSuccess(t *testing.T) {
 	deviceID := "device-123"
 	refreshToken := "refresh-token"
@@ -449,6 +536,56 @@ func TestHandleRefreshSuccess(t *testing.T) {
 	}
 	if !rotated || !created || !marked {
 		t.Fatalf("expected rotate/create/mark to be called: rotated=%v created=%v marked=%v", rotated, created, marked)
+	}
+}
+
+func TestHandleRefreshWithinGraceDoesNotRotate(t *testing.T) {
+	deviceID := "device-123"
+	refreshToken := "refresh-token"
+	now := time.Now()
+	var rotated bool
+
+	q := stubQuerier{
+		getAuthSessionByRefreshHashFn: func(_ context.Context, _ sqlc.GetAuthSessionByRefreshHashParams) (sqlc.AuthSession, error) {
+			return sqlc.AuthSession{
+				ID:               pgtype.UUID{Bytes: [16]byte{1}, Valid: true},
+				UserID:           pgtype.UUID{Bytes: [16]byte{2}, Valid: true},
+				DeviceIDHash:     hashString(deviceID),
+				RefreshTokenHash: hashString(refreshToken),
+				RotatedAt:        pgtype.Timestamptz{Time: now.Add(-10 * time.Second), Valid: true},
+			}, nil
+		},
+		rotateAuthSessionFn: func(context.Context, sqlc.RotateAuthSessionParams) error {
+			rotated = true
+			return nil
+		},
+		createAuthSessionFn: func(context.Context, sqlc.CreateAuthSessionParams) (sqlc.AuthSession, error) {
+			return sqlc.AuthSession{}, nil
+		},
+		markAuthSessionUsedFn: func(context.Context, sqlc.MarkAuthSessionUsedParams) error {
+			return nil
+		},
+	}
+
+	api := New(&stubStore{querier: q}, &mailer.LogMailer{}, Settings{
+		AccessTTL:    15 * time.Minute,
+		RefreshTTL:   24 * time.Hour,
+		RefreshGrace: 30 * time.Second,
+	}, nil)
+	api.clock = func() time.Time { return now }
+
+	body, _ := json.Marshal(refreshRequest{RefreshToken: refreshToken})
+	req := httptest.NewRequest(http.MethodPost, "/auth/refresh", bytes.NewReader(body))
+	req.Header.Set("X-Device-Id", deviceID)
+	rec := httptest.NewRecorder()
+
+	api.handleRefresh(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+	if rotated {
+		t.Fatal("expected not to rotate within grace period")
 	}
 }
 
@@ -514,5 +651,399 @@ func TestHandleLogoutSuccess(t *testing.T) {
 	}
 	if !revoked {
 		t.Fatal("expected revoke to be called")
+	}
+}
+
+func TestHandleLogoutInvalidDevice(t *testing.T) {
+	deviceID := "device-123"
+	refreshToken := "refresh-token"
+
+	q := stubQuerier{
+		getAuthSessionByRefreshHashFn: func(_ context.Context, _ sqlc.GetAuthSessionByRefreshHashParams) (sqlc.AuthSession, error) {
+			return sqlc.AuthSession{
+				DeviceIDHash: hashString("other-device"),
+			}, nil
+		},
+	}
+
+	api := New(&stubStore{querier: q}, &mailer.LogMailer{}, Settings{}, nil)
+
+	body, _ := json.Marshal(refreshRequest{RefreshToken: refreshToken})
+	req := httptest.NewRequest(http.MethodPost, "/auth/logout", bytes.NewReader(body))
+	req.Header.Set("X-Device-Id", deviceID)
+	rec := httptest.NewRecorder()
+
+	api.handleLogout(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected status 401, got %d", rec.Code)
+	}
+}
+
+func TestHandleVerifyCodeMissingDeviceID(t *testing.T) {
+	api := New(&stubStore{}, &mailer.LogMailer{}, Settings{}, nil)
+	body, _ := json.Marshal(verifyCodeRequest{Email: "user@example.com", Code: "ABCD2345"})
+	req := httptest.NewRequest(http.MethodPost, "/auth/verify-code", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	api.handleVerifyCode(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", rec.Code)
+	}
+}
+
+func TestHandleVerifyCodeInvalidEmail(t *testing.T) {
+	api := New(&stubStore{}, &mailer.LogMailer{}, Settings{}, nil)
+	body, _ := json.Marshal(verifyCodeRequest{Email: "bad-email", Code: "ABCD2345"})
+	req := httptest.NewRequest(http.MethodPost, "/auth/verify-code", bytes.NewReader(body))
+	req.Header.Set("X-Device-Id", "device-123")
+	rec := httptest.NewRecorder()
+
+	api.handleVerifyCode(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", rec.Code)
+	}
+}
+
+func TestHandleVerifyCodeInvalidFormat(t *testing.T) {
+	api := New(&stubStore{}, &mailer.LogMailer{}, Settings{}, nil)
+	body, _ := json.Marshal(verifyCodeRequest{Email: "user@example.com", Code: "ABCD2301"})
+	req := httptest.NewRequest(http.MethodPost, "/auth/verify-code", bytes.NewReader(body))
+	req.Header.Set("X-Device-Id", "device-123")
+	rec := httptest.NewRecorder()
+
+	api.handleVerifyCode(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", rec.Code)
+	}
+}
+
+func TestHandleVerifyCodePreLocked(t *testing.T) {
+	api := New(&stubStore{}, &mailer.LogMailer{}, Settings{}, nil)
+	now := time.Now()
+	api.failLimit.RegisterFailure("user@example.com", 1, time.Minute, time.Minute, now)
+
+	body, _ := json.Marshal(verifyCodeRequest{Email: "user@example.com", Code: "ABCD2345"})
+	req := httptest.NewRequest(http.MethodPost, "/auth/verify-code", bytes.NewReader(body))
+	req.Header.Set("X-Device-Id", "device-123")
+	rec := httptest.NewRecorder()
+
+	api.handleVerifyCode(rec, req)
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected status 429, got %d", rec.Code)
+	}
+}
+
+func TestHandleVerifyCodeTeamFull(t *testing.T) {
+	email := "user@example.com"
+	code := "ABCD2345"
+	deviceID := "device-123"
+	now := time.Now()
+
+	q := stubQuerier{
+		getEmailVerificationCodeFn: func(context.Context, sqlc.GetEmailVerificationCodeParams) (sqlc.EmailVerificationCode, error) {
+			return sqlc.EmailVerificationCode{ID: pgtype.UUID{Bytes: [16]byte{1}, Valid: true}}, nil
+		},
+		markEmailVerificationCodeFn: func(context.Context, sqlc.MarkEmailVerificationCodeUsedParams) error {
+			return nil
+		},
+		getUserByEmailFn: func(context.Context, string) (sqlc.User, error) {
+			return sqlc.User{
+				ID:              pgtype.UUID{Bytes: [16]byte{2}, Valid: true},
+				Email:           email,
+				EmailVerifiedAt: pgtype.Timestamptz{Time: now, Valid: true},
+			}, nil
+		},
+		getTeamByDomainFn: func(context.Context, string) (sqlc.Team, error) {
+			return sqlc.Team{ID: pgtype.UUID{Bytes: [16]byte{3}, Valid: true}, Domain: "example.com", Name: "example.com"}, nil
+		},
+		getTeamMembershipFn: func(context.Context, sqlc.GetTeamMembershipParams) (sqlc.TeamMembership, error) {
+			return sqlc.TeamMembership{}, pgx.ErrNoRows
+		},
+		countTeamMembersFn: func(context.Context, pgtype.UUID) (int64, error) {
+			return 1, nil
+		},
+	}
+
+	api := New(&stubStore{
+		querier: q,
+		beginTxFn: func(context.Context, pgx.TxOptions) (pgx.Tx, error) {
+			return &testTx{}, nil
+		},
+	}, &mailer.LogMailer{}, Settings{
+		VerifyCodeEmailLimit:  5,
+		VerifyCodeEmailWindow: 15 * time.Minute,
+		VerifyCodeLock:        15 * time.Minute,
+		TeamSizeLimit:         1,
+	}, nil)
+	api.clock = func() time.Time { return now }
+
+	body, _ := json.Marshal(verifyCodeRequest{Email: email, Code: code})
+	req := httptest.NewRequest(http.MethodPost, "/auth/verify-code", bytes.NewReader(body))
+	req.Header.Set("X-Device-Id", deviceID)
+	rec := httptest.NewRecorder()
+
+	api.handleVerifyCode(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected status 409, got %d", rec.Code)
+	}
+}
+
+func TestHandleVerifyCodeMarkUsedFailure(t *testing.T) {
+	email := "user@example.com"
+	code := "ABCD2345"
+
+	q := stubQuerier{
+		getEmailVerificationCodeFn: func(context.Context, sqlc.GetEmailVerificationCodeParams) (sqlc.EmailVerificationCode, error) {
+			return sqlc.EmailVerificationCode{ID: pgtype.UUID{Bytes: [16]byte{1}, Valid: true}}, nil
+		},
+		markEmailVerificationCodeFn: func(context.Context, sqlc.MarkEmailVerificationCodeUsedParams) error {
+			return errors.New("update failed")
+		},
+	}
+
+	api := New(&stubStore{
+		querier: q,
+		beginTxFn: func(context.Context, pgx.TxOptions) (pgx.Tx, error) {
+			return &testTx{}, nil
+		},
+	}, &mailer.LogMailer{}, Settings{
+		VerifyCodeEmailLimit:  5,
+		VerifyCodeEmailWindow: 15 * time.Minute,
+		VerifyCodeLock:        15 * time.Minute,
+	}, nil)
+
+	body, _ := json.Marshal(verifyCodeRequest{Email: email, Code: code})
+	req := httptest.NewRequest(http.MethodPost, "/auth/verify-code", bytes.NewReader(body))
+	req.Header.Set("X-Device-Id", "device-123")
+	rec := httptest.NewRecorder()
+
+	api.handleVerifyCode(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", rec.Code)
+	}
+}
+
+func TestHandleVerifyCodeCreateAuthSessionFailure(t *testing.T) {
+	email := "user@example.com"
+	code := "ABCD2345"
+	deviceID := "device-123"
+	now := time.Now()
+
+	q := stubQuerier{
+		getEmailVerificationCodeFn: func(context.Context, sqlc.GetEmailVerificationCodeParams) (sqlc.EmailVerificationCode, error) {
+			return sqlc.EmailVerificationCode{ID: pgtype.UUID{Bytes: [16]byte{1}, Valid: true}}, nil
+		},
+		markEmailVerificationCodeFn: func(context.Context, sqlc.MarkEmailVerificationCodeUsedParams) error {
+			return nil
+		},
+		getUserByEmailFn: func(context.Context, string) (sqlc.User, error) {
+			return sqlc.User{ID: pgtype.UUID{Bytes: [16]byte{2}, Valid: true}, Email: email, EmailVerifiedAt: pgtype.Timestamptz{Time: now, Valid: true}}, nil
+		},
+		getTeamByDomainFn: func(context.Context, string) (sqlc.Team, error) {
+			return sqlc.Team{ID: pgtype.UUID{Bytes: [16]byte{3}, Valid: true}, Domain: "example.com", Name: "example.com"}, nil
+		},
+		getTeamMembershipFn: func(context.Context, sqlc.GetTeamMembershipParams) (sqlc.TeamMembership, error) {
+			return sqlc.TeamMembership{}, pgx.ErrNoRows
+		},
+		countTeamMembersFn: func(context.Context, pgtype.UUID) (int64, error) {
+			return 0, nil
+		},
+		createTeamMembershipFn: func(context.Context, sqlc.CreateTeamMembershipParams) error {
+			return nil
+		},
+		createAuthSessionFn: func(context.Context, sqlc.CreateAuthSessionParams) (sqlc.AuthSession, error) {
+			return sqlc.AuthSession{}, errors.New("insert failed")
+		},
+	}
+
+	api := New(&stubStore{
+		querier: q,
+		beginTxFn: func(context.Context, pgx.TxOptions) (pgx.Tx, error) {
+			return &testTx{}, nil
+		},
+	}, &mailer.LogMailer{}, Settings{
+		AccessTTL:              15 * time.Minute,
+		RefreshTTL:             24 * time.Hour,
+		CodeTTL:                10 * time.Minute,
+		VerifyCodeEmailLimit:   5,
+		VerifyCodeEmailWindow:  15 * time.Minute,
+		VerifyCodeLock:         15 * time.Minute,
+		TeamSizeLimit:          30,
+		RequestCodeEmailLimit:  1,
+		RequestCodeEmailWindow: time.Minute,
+	}, nil)
+	api.clock = func() time.Time { return now }
+
+	body, _ := json.Marshal(verifyCodeRequest{Email: email, Code: code})
+	req := httptest.NewRequest(http.MethodPost, "/auth/verify-code", bytes.NewReader(body))
+	req.Header.Set("X-Device-Id", deviceID)
+	rec := httptest.NewRecorder()
+
+	api.handleVerifyCode(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", rec.Code)
+	}
+}
+
+func TestHandleRefreshRotatedExpired(t *testing.T) {
+	deviceID := "device-123"
+	refreshToken := "refresh-token"
+	now := time.Now()
+
+	q := stubQuerier{
+		getAuthSessionByRefreshHashFn: func(_ context.Context, _ sqlc.GetAuthSessionByRefreshHashParams) (sqlc.AuthSession, error) {
+			return sqlc.AuthSession{
+				DeviceIDHash:     hashString(deviceID),
+				RefreshTokenHash: hashString(refreshToken),
+				RotatedAt:        pgtype.Timestamptz{Time: now.Add(-time.Minute), Valid: true},
+			}, nil
+		},
+	}
+
+	api := New(&stubStore{querier: q}, &mailer.LogMailer{}, Settings{
+		AccessTTL:    15 * time.Minute,
+		RefreshTTL:   24 * time.Hour,
+		RefreshGrace: 30 * time.Second,
+	}, nil)
+	api.clock = func() time.Time { return now }
+
+	body, _ := json.Marshal(refreshRequest{RefreshToken: refreshToken})
+	req := httptest.NewRequest(http.MethodPost, "/auth/refresh", bytes.NewReader(body))
+	req.Header.Set("X-Device-Id", deviceID)
+	rec := httptest.NewRecorder()
+
+	api.handleRefresh(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected status 401, got %d", rec.Code)
+	}
+}
+
+func TestHandleRefreshNotFound(t *testing.T) {
+	q := stubQuerier{
+		getAuthSessionByRefreshHashFn: func(context.Context, sqlc.GetAuthSessionByRefreshHashParams) (sqlc.AuthSession, error) {
+			return sqlc.AuthSession{}, pgx.ErrNoRows
+		},
+	}
+
+	api := New(&stubStore{querier: q}, &mailer.LogMailer{}, Settings{}, nil)
+
+	body, _ := json.Marshal(refreshRequest{RefreshToken: "refresh-token"})
+	req := httptest.NewRequest(http.MethodPost, "/auth/refresh", bytes.NewReader(body))
+	req.Header.Set("X-Device-Id", "device-123")
+	rec := httptest.NewRecorder()
+
+	api.handleRefresh(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected status 401, got %d", rec.Code)
+	}
+}
+
+func TestHandleRefreshRotateFailure(t *testing.T) {
+	deviceID := "device-123"
+	refreshToken := "refresh-token"
+
+	q := stubQuerier{
+		getAuthSessionByRefreshHashFn: func(_ context.Context, _ sqlc.GetAuthSessionByRefreshHashParams) (sqlc.AuthSession, error) {
+			return sqlc.AuthSession{
+				ID:           pgtype.UUID{Bytes: [16]byte{1}, Valid: true},
+				DeviceIDHash: hashString(deviceID),
+			}, nil
+		},
+		rotateAuthSessionFn: func(context.Context, sqlc.RotateAuthSessionParams) error {
+			return errors.New("rotate failed")
+		},
+	}
+
+	api := New(&stubStore{querier: q}, &mailer.LogMailer{}, Settings{
+		RefreshGrace: 30 * time.Second,
+	}, nil)
+
+	body, _ := json.Marshal(refreshRequest{RefreshToken: refreshToken})
+	req := httptest.NewRequest(http.MethodPost, "/auth/refresh", bytes.NewReader(body))
+	req.Header.Set("X-Device-Id", deviceID)
+	rec := httptest.NewRecorder()
+
+	api.handleRefresh(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", rec.Code)
+	}
+}
+
+func TestHandleRefreshCreateSessionFailure(t *testing.T) {
+	deviceID := "device-123"
+	refreshToken := "refresh-token"
+
+	q := stubQuerier{
+		getAuthSessionByRefreshHashFn: func(_ context.Context, _ sqlc.GetAuthSessionByRefreshHashParams) (sqlc.AuthSession, error) {
+			return sqlc.AuthSession{
+				ID:           pgtype.UUID{Bytes: [16]byte{1}, Valid: true},
+				UserID:       pgtype.UUID{Bytes: [16]byte{2}, Valid: true},
+				DeviceIDHash: hashString(deviceID),
+			}, nil
+		},
+		rotateAuthSessionFn: func(context.Context, sqlc.RotateAuthSessionParams) error {
+			return nil
+		},
+		createAuthSessionFn: func(context.Context, sqlc.CreateAuthSessionParams) (sqlc.AuthSession, error) {
+			return sqlc.AuthSession{}, errors.New("insert failed")
+		},
+	}
+
+	api := New(&stubStore{querier: q}, &mailer.LogMailer{}, Settings{
+		AccessTTL:    15 * time.Minute,
+		RefreshTTL:   24 * time.Hour,
+		RefreshGrace: 30 * time.Second,
+	}, nil)
+
+	body, _ := json.Marshal(refreshRequest{RefreshToken: refreshToken})
+	req := httptest.NewRequest(http.MethodPost, "/auth/refresh", bytes.NewReader(body))
+	req.Header.Set("X-Device-Id", deviceID)
+	rec := httptest.NewRecorder()
+
+	api.handleRefresh(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", rec.Code)
+	}
+}
+
+func TestHandleLogoutRevokeFailure(t *testing.T) {
+	deviceID := "device-123"
+	refreshToken := "refresh-token"
+
+	q := stubQuerier{
+		getAuthSessionByRefreshHashFn: func(_ context.Context, _ sqlc.GetAuthSessionByRefreshHashParams) (sqlc.AuthSession, error) {
+			return sqlc.AuthSession{
+				ID:           pgtype.UUID{Bytes: [16]byte{1}, Valid: true},
+				DeviceIDHash: hashString(deviceID),
+			}, nil
+		},
+		revokeAuthSessionFn: func(context.Context, sqlc.RevokeAuthSessionParams) error {
+			return errors.New("revoke failed")
+		},
+	}
+
+	api := New(&stubStore{querier: q}, &mailer.LogMailer{}, Settings{}, nil)
+
+	body, _ := json.Marshal(refreshRequest{RefreshToken: refreshToken})
+	req := httptest.NewRequest(http.MethodPost, "/auth/logout", bytes.NewReader(body))
+	req.Header.Set("X-Device-Id", deviceID)
+	rec := httptest.NewRecorder()
+
+	api.handleLogout(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", rec.Code)
 	}
 }
