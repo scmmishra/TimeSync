@@ -10,6 +10,7 @@ import (
 
 	"timesync/backend/internal/sqlc"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -379,7 +380,7 @@ func uuidString(id pgtype.UUID) string {
 	if !id.Valid {
 		return ""
 	}
-	return id.String()
+	return uuid.UUID(id.Bytes).String()
 }
 
 func hashEqual(a, b []byte) bool {
