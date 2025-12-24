@@ -55,3 +55,12 @@ func TestLoadRequiresDatabaseURL(t *testing.T) {
 		t.Fatal("expected Load to fail without DATABASE_URL")
 	}
 }
+
+func TestLoadRejectsInvalidNumbers(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://example")
+	t.Setenv("PORT", "not-a-number")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("expected Load to fail with invalid PORT")
+	}
+}

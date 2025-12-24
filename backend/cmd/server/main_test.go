@@ -64,3 +64,17 @@ func TestNewMailerUsesLogMailer(t *testing.T) {
 		t.Fatalf("expected LogMailer, got %T", m)
 	}
 }
+
+func TestNewMailerUsesSMTP(t *testing.T) {
+	m, err := newMailer(config.Config{
+		SMTPHost: "localhost",
+		SMTPPort: 1025,
+		SMTPFrom: "no-reply@example.com",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := m.(*mailer.SMTPMailer); !ok {
+		t.Fatalf("expected SMTPMailer, got %T", m)
+	}
+}

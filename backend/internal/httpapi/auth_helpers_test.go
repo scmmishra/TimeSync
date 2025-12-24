@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -77,5 +78,16 @@ func TestUUIDString(t *testing.T) {
 	}
 	if uuidString(pgtype.UUID{}) != "" {
 		t.Fatal("expected empty string for invalid uuid")
+	}
+}
+
+func TestToTimestamptz(t *testing.T) {
+	now := time.Now()
+	ts := toTimestamptz(now)
+	if !ts.Valid {
+		t.Fatal("expected timestamptz to be valid")
+	}
+	if !ts.Time.Equal(now) {
+		t.Fatalf("expected time %v, got %v", now, ts.Time)
 	}
 }

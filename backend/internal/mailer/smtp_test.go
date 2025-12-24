@@ -1,6 +1,9 @@
 package mailer
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestNewSMTP(t *testing.T) {
 	cfg := SMTPConfig{
@@ -20,5 +23,15 @@ func TestNewSMTP(t *testing.T) {
 	}
 	if m.from != cfg.From {
 		t.Fatalf("expected from %q, got %q", cfg.From, m.from)
+	}
+}
+
+func TestSMTPMailerSendVerificationCodeInvalidFrom(t *testing.T) {
+	m := &SMTPMailer{
+		from: "invalid address",
+	}
+
+	if err := m.SendVerificationCode(context.Background(), "user@example.com", "ABC12345"); err == nil {
+		t.Fatal("expected error for invalid from address")
 	}
 }
