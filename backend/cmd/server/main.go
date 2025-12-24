@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -17,9 +17,13 @@ import (
 )
 
 func main() {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{}))
+	slog.SetDefault(logger)
+
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatal(err)
+		slog.Error("failed to load config", slog.Any("err", err))
+		os.Exit(1)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -27,7 +31,8 @@ func main() {
 
 	st, err := store.Open(ctx, cfg.DatabaseURL)
 	if err != nil {
-		log.Fatal(err)
+		slog.Error("failed to connect to database", slog.Any("err", err))
+		os.Exit(1)
 	}
 	defer st.Close()
 
@@ -43,12 +48,32 @@ func main() {
 			From: cfg.SMTPFrom,
 		})
 		if err != nil {
-			log.Fatal(err)
+			slog.Error("failed to init smtp mailer", slog.Any("err", err))
+			os.Exit(1)
 		}
 		mailerSvc = smtpMailer
 	}
 
-	api := httpapi.New(st, mailerSvc)
+	settings := httpapi.Settings{
+		AccessTTL:              time.Duration(cfg.AccessTTLMinutes) * time.Minute,
+		RefreshTTL:             time.Duration(cfg.RefreshTTLHours) * time.Hour,
+		CodeTTL:                time.Duration(cfg.CodeTTLMinutes) * time.Minute,
+		RefreshGrace:           time.Duration(cfg.RefreshGraceSeconds) * time.Second,
+		TeamSizeLimit:          cfg.TeamSizeLimit,
+		RequestCodeEmailLimit:  cfg.RequestCodeEmailLimit,
+		RequestCodeEmailWindow: time.Duration(cfg.RequestCodeEmailWindow) * time.Minute,
+		RequestCodeIPLimit:     cfg.RequestCodeIPLimit,
+		RequestCodeIPWindow:    time.Duration(cfg.RequestCodeIPWindow) * time.Minute,
+		VerifyCodeEmailLimit:   cfg.VerifyCodeEmailLimit,
+		VerifyCodeEmailWindow:  time.Duration(cfg.VerifyCodeEmailWindow) * time.Minute,
+		VerifyCodeLock:         time.Duration(cfg.VerifyCodeLockMinutes) * time.Minute,
+		VerifyCodeIPLimit:      cfg.VerifyCodeIPLimit,
+		VerifyCodeIPWindow:     time.Duration(cfg.VerifyCodeIPWindow) * time.Minute,
+		RefreshDeviceLimit:     cfg.RefreshDeviceLimit,
+		RefreshDeviceWindow:    time.Duration(cfg.RefreshDeviceWindow) * time.Minute,
+	}
+
+	api := httpapi.New(st, mailerSvc, settings, logger)
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	srv := &http.Server{
@@ -60,9 +85,10 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("backend listening on %s", addr)
+		slog.Info("backend listening", slog.String("addr", addr))
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("server error: %v", err)
+			slog.Error("server error", slog.Any("err", err))
+			os.Exit(1)
 		}
 	}()
 
@@ -71,6 +97,6 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Printf("server shutdown error: %v", err)
+		slog.Error("server shutdown error", slog.Any("err", err))
 	}
 }

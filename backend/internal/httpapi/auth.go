@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
+	"net/mail"
 	"strings"
 	"time"
 
@@ -56,14 +58,14 @@ func (a *API) handleRequestCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	email := normalizeEmail(req.Email)
-	if email == "" {
+	email, ok := normalizeEmail(req.Email)
+	if !ok {
 		writeError(w, http.StatusBadRequest, "email is required")
 		return
 	}
 
 	now := a.clock()
-	if !a.emailLimit.Allow(email, requestCodeLimit, 15*time.Minute, now) {
+	if !a.emailLimit.Allow(email, a.settings.RequestCodeEmailLimit, a.settings.RequestCodeEmailWindow, now) {
 		writeError(w, http.StatusTooManyRequests, "too many requests")
 		return
 	}
@@ -74,7 +76,7 @@ func (a *API) handleRequestCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	expiresAt := now.Add(codeTTL)
+	expiresAt := now.Add(a.settings.CodeTTL)
 	_, err = a.store.Queries.CreateEmailVerificationCode(r.Context(), sqlc.CreateEmailVerificationCodeParams{
 		Email:     email,
 		Code:      code,
@@ -86,6 +88,7 @@ func (a *API) handleRequestCode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := a.mailer.SendVerificationCode(r.Context(), email, code); err != nil {
+		a.logger.Error("failed to send verification code", slog.String("email", email), slog.Any("err", err))
 		writeError(w, http.StatusInternalServerError, "failed to send verification code")
 		return
 	}
@@ -100,9 +103,14 @@ func (a *API) handleVerifyCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	email := normalizeEmail(req.Email)
-	if email == "" || strings.TrimSpace(req.Code) == "" {
+	email, ok := normalizeEmail(req.Email)
+	if !ok {
 		writeError(w, http.StatusBadRequest, "email and code are required")
+		return
+	}
+	code := strings.ToUpper(strings.TrimSpace(req.Code))
+	if !isValidCode(code) {
+		writeError(w, http.StatusBadRequest, "invalid code format")
 		return
 	}
 
@@ -129,12 +137,12 @@ func (a *API) handleVerifyCode(w http.ResponseWriter, r *http.Request) {
 	q := a.store.Queries.WithTx(tx)
 	codeRow, err := q.GetEmailVerificationCode(ctx, sqlc.GetEmailVerificationCodeParams{
 		Email:     email,
-		Code:      strings.TrimSpace(req.Code),
+		Code:      code,
 		ExpiresAt: toTimestamptz(now),
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			locked := a.failLimit.RegisterFailure(email, verifyCodeLimit, 15*time.Minute, 15*time.Minute, now)
+			locked := a.failLimit.RegisterFailure(email, a.settings.VerifyCodeEmailLimit, a.settings.VerifyCodeEmailWindow, a.settings.VerifyCodeLock, now)
 			if locked {
 				writeError(w, http.StatusTooManyRequests, "too many attempts")
 				return
@@ -172,7 +180,7 @@ func (a *API) handleVerifyCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	role, err := ensureMembership(ctx, q, user, team, isNewUser, createdTeam, now)
+	role, err := ensureMembership(ctx, q, user, team, isNewUser, createdTeam, now, a.settings.TeamSizeLimit)
 	if err != nil {
 		if errors.Is(err, errTeamFull) {
 			writeError(w, http.StatusConflict, "team is full")
@@ -193,8 +201,8 @@ func (a *API) handleVerifyCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accessExpires := now.Add(accessTTL)
-	refreshExpires := now.Add(refreshTTL)
+	accessExpires := now.Add(a.settings.AccessTTL)
+	refreshExpires := now.Add(a.settings.RefreshTTL)
 	_, err = q.CreateAuthSession(ctx, sqlc.CreateAuthSessionParams{
 		UserID:           user.ID,
 		DeviceIDHash:     hashString(deviceID),
@@ -268,15 +276,19 @@ func (a *API) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if session.RotatedAt.Valid {
-		if now.Sub(session.RotatedAt.Time) > refreshGrace {
+		if now.Sub(session.RotatedAt.Time) > a.settings.RefreshGrace {
 			writeError(w, http.StatusUnauthorized, "refresh token expired")
 			return
 		}
 	} else {
-		_ = a.store.Queries.RotateAuthSession(r.Context(), sqlc.RotateAuthSessionParams{
+		if err := a.store.Queries.RotateAuthSession(r.Context(), sqlc.RotateAuthSessionParams{
 			ID:        session.ID,
 			RotatedAt: toTimestamptz(now),
-		})
+		}); err != nil {
+			a.logger.Error("failed to rotate session", slog.Any("err", err))
+			writeError(w, http.StatusInternalServerError, "failed to refresh session")
+			return
+		}
 	}
 
 	accessToken, accessHash, err := generateToken()
@@ -290,8 +302,8 @@ func (a *API) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accessExpires := now.Add(accessTTL)
-	refreshExpires := now.Add(refreshTTL)
+	accessExpires := now.Add(a.settings.AccessTTL)
+	refreshExpires := now.Add(a.settings.RefreshTTL)
 	_, err = a.store.Queries.CreateAuthSession(r.Context(), sqlc.CreateAuthSessionParams{
 		UserID:           session.UserID,
 		DeviceIDHash:     session.DeviceIDHash,
@@ -305,10 +317,12 @@ func (a *API) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_ = a.store.Queries.MarkAuthSessionUsed(r.Context(), sqlc.MarkAuthSessionUsedParams{
+	if err := a.store.Queries.MarkAuthSessionUsed(r.Context(), sqlc.MarkAuthSessionUsedParams{
 		ID:         session.ID,
 		LastUsedAt: toTimestamptz(now),
-	})
+	}); err != nil {
+		a.logger.Error("failed to mark session used", slog.Any("err", err))
+	}
 
 	writeJSON(w, http.StatusOK, authResponse{
 		AccessToken:      accessToken,
@@ -352,16 +366,31 @@ func (a *API) handleLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_ = a.store.Queries.RevokeAuthSession(r.Context(), sqlc.RevokeAuthSessionParams{
+	if err := a.store.Queries.RevokeAuthSession(r.Context(), sqlc.RevokeAuthSessionParams{
 		ID:        session.ID,
 		RevokedAt: toTimestamptz(now),
-	})
+	}); err != nil {
+		a.logger.Error("failed to revoke session", slog.Any("err", err))
+		writeError(w, http.StatusInternalServerError, "failed to revoke session")
+		return
+	}
 
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func normalizeEmail(value string) string {
-	return strings.ToLower(strings.TrimSpace(value))
+func normalizeEmail(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", false
+	}
+	addr, err := mail.ParseAddress(value)
+	if err != nil {
+		return "", false
+	}
+	if addr.Address == "" {
+		return "", false
+	}
+	return strings.ToLower(addr.Address), true
 }
 
 func emailDomain(email string) (string, bool) {
@@ -442,7 +471,7 @@ func getOrCreateTeam(ctx context.Context, q *sqlc.Queries, domain string) (sqlc.
 	return team, true, nil
 }
 
-func ensureMembership(ctx context.Context, q *sqlc.Queries, user sqlc.User, team sqlc.Team, isNewUser, createdTeam bool, now time.Time) (string, error) {
+func ensureMembership(ctx context.Context, q *sqlc.Queries, user sqlc.User, team sqlc.Team, isNewUser, createdTeam bool, now time.Time, teamSizeLimit int) (string, error) {
 	membership, err := q.GetTeamMembership(ctx, sqlc.GetTeamMembershipParams{
 		TeamID: team.ID,
 		UserID: user.ID,
@@ -458,7 +487,7 @@ func ensureMembership(ctx context.Context, q *sqlc.Queries, user sqlc.User, team
 	if err != nil {
 		return "", err
 	}
-	if count >= 30 {
+	if count >= int64(teamSizeLimit) {
 		return "", errTeamFull
 	}
 
@@ -477,4 +506,16 @@ func ensureMembership(ctx context.Context, q *sqlc.Queries, user sqlc.User, team
 	}
 
 	return role, nil
+}
+
+func isValidCode(code string) bool {
+	if len(code) != codeLength {
+		return false
+	}
+	for _, r := range code {
+		if !strings.ContainsRune(string(codeAlphabet), r) {
+			return false
+		}
+	}
+	return true
 }

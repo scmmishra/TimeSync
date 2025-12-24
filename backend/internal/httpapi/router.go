@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -12,27 +13,44 @@ import (
 	"github.com/go-chi/httprate"
 )
 
-const (
-	accessTTL        = 30 * time.Minute
-	refreshTTL       = 30 * 24 * time.Hour
-	codeTTL          = 10 * time.Minute
-	refreshGrace     = 30 * time.Second
-	requestCodeLimit = 3
-	verifyCodeLimit  = 5
-)
+type Settings struct {
+	AccessTTL              time.Duration
+	RefreshTTL             time.Duration
+	CodeTTL                time.Duration
+	RefreshGrace           time.Duration
+	TeamSizeLimit          int
+	RequestCodeEmailLimit  int
+	RequestCodeEmailWindow time.Duration
+	RequestCodeIPLimit     int
+	RequestCodeIPWindow    time.Duration
+	VerifyCodeEmailLimit   int
+	VerifyCodeEmailWindow  time.Duration
+	VerifyCodeLock         time.Duration
+	VerifyCodeIPLimit      int
+	VerifyCodeIPWindow     time.Duration
+	RefreshDeviceLimit     int
+	RefreshDeviceWindow    time.Duration
+}
 
 type API struct {
 	store      *store.Store
 	mailer     mailer.Mailer
+	logger     *slog.Logger
+	settings   Settings
 	clock      func() time.Time
 	emailLimit *attemptTracker
 	failLimit  *attemptTracker
 }
 
-func New(store *store.Store, mailer mailer.Mailer) *API {
+func New(store *store.Store, mailer mailer.Mailer, settings Settings, logger *slog.Logger) *API {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &API{
 		store:      store,
 		mailer:     mailer,
+		logger:     logger,
+		settings:   settings,
 		clock:      time.Now,
 		emailLimit: newAttemptTracker(),
 		failLimit:  newAttemptTracker(),
@@ -52,13 +70,13 @@ func (a *API) Handler() http.Handler {
 	})
 
 	router.Route("/auth", func(r chi.Router) {
-		r.With(httprate.Limit(10, time.Hour, httprate.WithKeyFuncs(httprate.KeyByIP))).
+		r.With(httprate.Limit(a.settings.RequestCodeIPLimit, a.settings.RequestCodeIPWindow, httprate.WithKeyFuncs(httprate.KeyByIP))).
 			Post("/request-code", a.handleRequestCode)
 
-		r.With(httprate.Limit(20, time.Hour, httprate.WithKeyFuncs(httprate.KeyByIP))).
+		r.With(httprate.Limit(a.settings.VerifyCodeIPLimit, a.settings.VerifyCodeIPWindow, httprate.WithKeyFuncs(httprate.KeyByIP))).
 			Post("/verify-code", a.handleVerifyCode)
 
-		r.With(httprate.Limit(10, time.Minute, httprate.WithKeyFuncs(keyByDeviceID))).
+		r.With(httprate.Limit(a.settings.RefreshDeviceLimit, a.settings.RefreshDeviceWindow, httprate.WithKeyFuncs(keyByDeviceID))).
 			Post("/refresh", a.handleRefresh)
 
 		r.Post("/logout", a.handleLogout)
