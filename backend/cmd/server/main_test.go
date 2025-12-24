@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -76,5 +77,22 @@ func TestNewMailerUsesSMTP(t *testing.T) {
 	}
 	if _, ok := m.(*mailer.SMTPMailer); !ok {
 		t.Fatalf("expected SMTPMailer, got %T", m)
+	}
+}
+
+func TestNewMailerSMTPError(t *testing.T) {
+	orig := newSMTP
+	newSMTP = func(mailer.SMTPConfig) (*mailer.SMTPMailer, error) {
+		return nil, errors.New("boom")
+	}
+	t.Cleanup(func() { newSMTP = orig })
+
+	_, err := newMailer(config.Config{
+		SMTPHost: "smtp.example.com",
+		SMTPPort: 587,
+		SMTPFrom: "no-reply@example.com",
+	})
+	if err == nil {
+		t.Fatal("expected error from newMailer")
 	}
 }

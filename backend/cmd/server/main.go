@@ -73,11 +73,13 @@ func main() {
 	}
 }
 
+var newSMTP = mailer.NewSMTP
+
 func newMailer(cfg config.Config) (mailer.Mailer, error) {
 	if cfg.SMTPHost == "" {
 		return &mailer.LogMailer{}, nil
 	}
-	return mailer.NewSMTP(mailer.SMTPConfig{
+	return newSMTP(mailer.SMTPConfig{
 		Host: cfg.SMTPHost,
 		Port: cfg.SMTPPort,
 		User: cfg.SMTPUser,

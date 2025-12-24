@@ -35,3 +35,13 @@ func TestSMTPMailerSendVerificationCodeInvalidFrom(t *testing.T) {
 		t.Fatal("expected error for invalid from address")
 	}
 }
+
+func TestSMTPMailerSendVerificationCodeInvalidTo(t *testing.T) {
+	m := &SMTPMailer{
+		from: "no-reply@example.com",
+	}
+
+	if err := m.SendVerificationCode(context.Background(), "bad address", "ABC12345"); err == nil {
+		t.Fatal("expected error for invalid recipient")
+	}
+}
