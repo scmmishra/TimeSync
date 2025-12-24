@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"timesync/backend/internal/config"
-	"timesync/backend/internal/db"
+	"timesync/backend/internal/store"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -26,11 +26,11 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	store, err := db.New(ctx, cfg.DatabaseURL)
+	st, err := store.Open(ctx, cfg.DatabaseURL)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer store.Close()
+	defer st.Close()
 
 	router := chi.NewRouter()
 	router.Use(middleware.RequestID)
