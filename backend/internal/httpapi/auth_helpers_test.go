@@ -2,6 +2,9 @@ package httpapi
 
 import (
 	"testing"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 func TestNormalizeEmail(t *testing.T) {
@@ -63,5 +66,16 @@ func TestHashEqual(t *testing.T) {
 	}
 	if hashEqual(a, []byte("short")) {
 		t.Fatal("expected mismatched lengths to fail")
+	}
+}
+
+func TestUUIDString(t *testing.T) {
+	id := uuid.New()
+	out := uuidString(pgtype.UUID{Bytes: id, Valid: true})
+	if out != id.String() {
+		t.Fatalf("expected %q, got %q", id.String(), out)
+	}
+	if uuidString(pgtype.UUID{}) != "" {
+		t.Fatal("expected empty string for invalid uuid")
 	}
 }

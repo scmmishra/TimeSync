@@ -1,6 +1,8 @@
 package config
 
 import (
+	"errors"
+
 	"github.com/caarlos0/env/v10"
 	"github.com/joho/godotenv"
 )
@@ -36,6 +38,9 @@ func Load() (Config, error) {
 	var cfg Config
 	if err := env.Parse(&cfg); err != nil {
 		return Config{}, err
+	}
+	if cfg.DatabaseURL == "" {
+		return Config{}, errors.New("DATABASE_URL is required")
 	}
 	return cfg, nil
 }
