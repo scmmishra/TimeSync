@@ -8,6 +8,20 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type AuthSession struct {
+	ID               pgtype.UUID
+	UserID           pgtype.UUID
+	DeviceIDHash     []byte
+	AccessTokenHash  []byte
+	AccessExpiresAt  pgtype.Timestamptz
+	RefreshTokenHash []byte
+	RefreshExpiresAt pgtype.Timestamptz
+	RotatedAt        pgtype.Timestamptz
+	RevokedAt        pgtype.Timestamptz
+	LastUsedAt       pgtype.Timestamptz
+	CreatedAt        pgtype.Timestamptz
+}
+
 type EmailVerificationCode struct {
 	ID        pgtype.UUID
 	Email     string

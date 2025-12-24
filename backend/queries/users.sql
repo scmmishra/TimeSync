@@ -8,6 +8,13 @@ SELECT id, email, email_domain, email_verified_at, created_at, updated_at
 FROM users
 WHERE email = $1;
 
+-- name: UpdateUserVerifiedAt :one
+UPDATE users
+SET email_verified_at = $2,
+    updated_at = now()
+WHERE id = $1
+RETURNING id, email, email_domain, email_verified_at, created_at, updated_at;
+
 -- name: CreateUser :one
 INSERT INTO users (
     email,

@@ -82,3 +82,30 @@ func (q *Queries) GetUserByID(ctx context.Context, id pgtype.UUID) (User, error)
 	)
 	return i, err
 }
+
+const updateUserVerifiedAt = `-- name: UpdateUserVerifiedAt :one
+UPDATE users
+SET email_verified_at = $2,
+    updated_at = now()
+WHERE id = $1
+RETURNING id, email, email_domain, email_verified_at, created_at, updated_at
+`
+
+type UpdateUserVerifiedAtParams struct {
+	ID              pgtype.UUID
+	EmailVerifiedAt pgtype.Timestamptz
+}
+
+func (q *Queries) UpdateUserVerifiedAt(ctx context.Context, arg UpdateUserVerifiedAtParams) (User, error) {
+	row := q.db.QueryRow(ctx, updateUserVerifiedAt, arg.ID, arg.EmailVerifiedAt)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.EmailDomain,
+		&i.EmailVerifiedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}

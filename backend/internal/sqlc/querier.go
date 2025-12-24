@@ -11,9 +11,24 @@ import (
 )
 
 type Querier interface {
+	CountTeamMembers(ctx context.Context, teamID pgtype.UUID) (int64, error)
+	CreateAuthSession(ctx context.Context, arg CreateAuthSessionParams) (AuthSession, error)
+	CreateEmailVerificationCode(ctx context.Context, arg CreateEmailVerificationCodeParams) (EmailVerificationCode, error)
+	CreateTeam(ctx context.Context, arg CreateTeamParams) (Team, error)
+	CreateTeamMembership(ctx context.Context, arg CreateTeamMembershipParams) error
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
+	GetAuthSessionByAccessHash(ctx context.Context, arg GetAuthSessionByAccessHashParams) (AuthSession, error)
+	GetAuthSessionByRefreshHash(ctx context.Context, arg GetAuthSessionByRefreshHashParams) (AuthSession, error)
+	GetEmailVerificationCode(ctx context.Context, arg GetEmailVerificationCodeParams) (EmailVerificationCode, error)
+	GetTeamByDomain(ctx context.Context, domain string) (Team, error)
+	GetTeamMembership(ctx context.Context, arg GetTeamMembershipParams) (TeamMembership, error)
 	GetUserByEmail(ctx context.Context, email string) (User, error)
 	GetUserByID(ctx context.Context, id pgtype.UUID) (User, error)
+	MarkAuthSessionUsed(ctx context.Context, arg MarkAuthSessionUsedParams) error
+	MarkEmailVerificationCodeUsed(ctx context.Context, arg MarkEmailVerificationCodeUsedParams) error
+	RevokeAuthSession(ctx context.Context, arg RevokeAuthSessionParams) error
+	RotateAuthSession(ctx context.Context, arg RotateAuthSessionParams) error
+	UpdateUserVerifiedAt(ctx context.Context, arg UpdateUserVerifiedAtParams) (User, error)
 }
 
 var _ Querier = (*Queries)(nil)
