@@ -1,6 +1,8 @@
 # Go
 /backend/bin/
 /backend/.env
+/backend/.gocache/
+/backend/.gomodcache/
 
 # Xcode
 DerivedData/
