@@ -4,14 +4,14 @@ import (
 	"context"
 	"time"
 
-	"timesync/backend/internal/db"
+	"timesync/backend/internal/sqlc"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type Store struct {
 	Pool    *pgxpool.Pool
-	Queries *db.Queries
+	Queries *sqlc.Queries
 }
 
 func Open(ctx context.Context, databaseURL string) (*Store, error) {
@@ -36,7 +36,7 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 
 	return &Store{
 		Pool:    pool,
-		Queries: db.New(pool),
+		Queries: sqlc.New(pool),
 	}, nil
 }
 
