@@ -24,42 +24,23 @@ func TestOpenInvalidURL(t *testing.T) {
 	}
 }
 
-type stubDB struct{}
+// minimal stub that only implements what's needed for tests
+type minimalDB struct{}
 
-func (stubDB) Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error) {
+func (minimalDB) Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error) {
 	return pgconn.CommandTag{}, nil
 }
 
-func (stubDB) Query(context.Context, string, ...interface{}) (pgx.Rows, error) {
+func (minimalDB) Query(context.Context, string, ...interface{}) (pgx.Rows, error) {
 	return nil, nil
 }
 
-func (stubDB) QueryRow(context.Context, string, ...interface{}) pgx.Row {
+func (minimalDB) QueryRow(context.Context, string, ...interface{}) pgx.Row {
 	return nil
 }
 
-type stubTx struct{}
-
-func (stubTx) Begin(context.Context) (pgx.Tx, error) { return stubTx{}, nil }
-func (stubTx) Commit(context.Context) error          { return nil }
-func (stubTx) Rollback(context.Context) error        { return nil }
-func (stubTx) CopyFrom(context.Context, pgx.Identifier, []string, pgx.CopyFromSource) (int64, error) {
-	return 0, nil
-}
-func (stubTx) SendBatch(context.Context, *pgx.Batch) pgx.BatchResults { return nil }
-func (stubTx) LargeObjects() pgx.LargeObjects                         { return pgx.LargeObjects{} }
-func (stubTx) Prepare(context.Context, string, string) (*pgconn.StatementDescription, error) {
-	return nil, nil
-}
-func (stubTx) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
-	return pgconn.CommandTag{}, nil
-}
-func (stubTx) Query(context.Context, string, ...any) (pgx.Rows, error) { return nil, nil }
-func (stubTx) QueryRow(context.Context, string, ...any) pgx.Row        { return nil }
-func (stubTx) Conn() *pgx.Conn                                         { return nil }
-
 func TestStoreQuerier(t *testing.T) {
-	q := sqlc.New(stubDB{})
+	q := sqlc.New(minimalDB{})
 	store := &Store{Queries: q}
 	if store.Querier() == nil {
 		t.Fatal("expected querier to be non-nil")
@@ -67,9 +48,33 @@ func TestStoreQuerier(t *testing.T) {
 }
 
 func TestStoreWithTx(t *testing.T) {
-	q := sqlc.New(stubDB{})
+	q := sqlc.New(minimalDB{})
 	store := &Store{Queries: q}
-	if store.WithTx(stubTx{}) == nil {
+
+	minimalTx := &minimalTxStub{}
+	result := store.WithTx(minimalTx)
+	if result == nil {
 		t.Fatal("expected WithTx to return queries")
 	}
 }
+
+// minimal transaction stub that only implements what's needed for tests
+type minimalTxStub struct{}
+
+func (minimalTxStub) Begin(context.Context) (pgx.Tx, error) { return nil, nil }
+func (minimalTxStub) Commit(context.Context) error          { return nil }
+func (minimalTxStub) Rollback(context.Context) error        { return nil }
+func (minimalTxStub) CopyFrom(context.Context, pgx.Identifier, []string, pgx.CopyFromSource) (int64, error) {
+	return 0, nil
+}
+func (minimalTxStub) SendBatch(context.Context, *pgx.Batch) pgx.BatchResults { return nil }
+func (minimalTxStub) LargeObjects() pgx.LargeObjects                          { return pgx.LargeObjects{} }
+func (minimalTxStub) Prepare(context.Context, string, string) (*pgconn.StatementDescription, error) {
+	return nil, nil
+}
+func (minimalTxStub) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, nil
+}
+func (minimalTxStub) Query(context.Context, string, ...any) (pgx.Rows, error) { return nil, nil }
+func (minimalTxStub) QueryRow(context.Context, string, ...any) pgx.Row        { return nil }
+func (minimalTxStub) Conn() *pgx.Conn                                         { return nil }

@@ -108,7 +108,7 @@ func (a *API) handleVerifyCode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "email and code are required")
 		return
 	}
-	code := strings.ToUpper(strings.TrimSpace(req.Code))
+	code := normalizeCode(req.Code)
 	if !isValidCode(code) {
 		writeError(w, http.StatusBadRequest, "invalid code format")
 		return
@@ -494,7 +494,7 @@ func ensureMembership(ctx context.Context, q sqlc.Querier, user sqlc.User, team 
 	}
 
 	role := "member"
-	if createdTeam || isNewUser && count == 0 {
+	if createdTeam || (isNewUser && count == 0) {
 		role = "admin"
 	}
 
@@ -508,6 +508,10 @@ func ensureMembership(ctx context.Context, q sqlc.Querier, user sqlc.User, team 
 	}
 
 	return role, nil
+}
+
+func normalizeCode(code string) string {
+	return strings.ToUpper(strings.TrimSpace(code))
 }
 
 func isValidCode(code string) bool {

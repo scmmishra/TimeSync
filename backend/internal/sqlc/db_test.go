@@ -8,22 +8,23 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-type stubDB struct{}
+// minimalDB implements the minimum required for testing
+type minimalDB struct{}
 
-func (stubDB) Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error) {
+func (minimalDB) Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error) {
 	return pgconn.CommandTag{}, nil
 }
 
-func (stubDB) Query(context.Context, string, ...interface{}) (pgx.Rows, error) {
+func (minimalDB) Query(context.Context, string, ...interface{}) (pgx.Rows, error) {
 	return nil, nil
 }
 
-func (stubDB) QueryRow(context.Context, string, ...interface{}) pgx.Row {
+func (minimalDB) QueryRow(context.Context, string, ...interface{}) pgx.Row {
 	return nil
 }
 
 func TestNewQueries(t *testing.T) {
-	q := New(stubDB{})
+	q := New(minimalDB{})
 	if q == nil {
 		t.Fatal("expected queries to be non-nil")
 	}

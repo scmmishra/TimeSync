@@ -38,6 +38,12 @@ func TestEmailDomain(t *testing.T) {
 	}
 }
 
+func TestNormalizeCode(t *testing.T) {
+	if normalizeCode("  abc1234  ") != "ABC1234" {
+		t.Fatal("expected normalizeCode to trim and uppercase")
+	}
+}
+
 func TestIsValidCode(t *testing.T) {
 	code, err := generateCode()
 	if err != nil {

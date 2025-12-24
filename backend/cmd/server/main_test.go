@@ -13,6 +13,61 @@ import (
 	"timesync/backend/internal/store"
 )
 
+// stubHelper saves and restores function pointers for testing
+type stubHelper struct {
+	t *testing.T
+	// saved originals
+	origLoadConfig   func() (config.Config, error)
+	origOpenStore    func(context.Context, string) (*store.Store, error)
+	origNewSMTP      func(mailer.SMTPConfig) (*mailer.SMTPMailer, error)
+	origListenServe  func(*http.Server) error
+	origShutdownSrv  func(*http.Server, context.Context) error
+}
+
+func newStubHelper(t *testing.T) *stubHelper {
+	return &stubHelper{
+		t:               t,
+		origLoadConfig:  loadConfig,
+		origOpenStore:   openStore,
+		origNewSMTP:     newSMTP,
+		origListenServe: listenAndServe,
+		origShutdownSrv: shutdownServer,
+	}
+}
+
+func (sh *stubHelper) onLoadConfig(fn func() (config.Config, error)) *stubHelper {
+	loadConfig = fn
+	return sh
+}
+
+func (sh *stubHelper) onOpenStore(fn func(context.Context, string) (*store.Store, error)) *stubHelper {
+	openStore = fn
+	return sh
+}
+
+func (sh *stubHelper) onNewSMTP(fn func(mailer.SMTPConfig) (*mailer.SMTPMailer, error)) *stubHelper {
+	newSMTP = fn
+	return sh
+}
+
+func (sh *stubHelper) onListenAndServe(fn func(*http.Server) error) *stubHelper {
+	listenAndServe = fn
+	return sh
+}
+
+func (sh *stubHelper) onShutdownServer(fn func(*http.Server, context.Context) error) *stubHelper {
+	shutdownServer = fn
+	return sh
+}
+
+func (sh *stubHelper) restore() {
+	loadConfig = sh.origLoadConfig
+	openStore = sh.origOpenStore
+	newSMTP = sh.origNewSMTP
+	listenAndServe = sh.origListenServe
+	shutdownServer = sh.origShutdownSrv
+}
+
 func TestBuildSettings(t *testing.T) {
 	cfg := config.Config{
 		AccessTTLMinutes:       5,
@@ -85,11 +140,10 @@ func TestNewMailerUsesSMTP(t *testing.T) {
 }
 
 func TestNewMailerSMTPError(t *testing.T) {
-	orig := newSMTP
-	newSMTP = func(mailer.SMTPConfig) (*mailer.SMTPMailer, error) {
+	stub := newStubHelper(t).onNewSMTP(func(mailer.SMTPConfig) (*mailer.SMTPMailer, error) {
 		return nil, errors.New("boom")
-	}
-	t.Cleanup(func() { newSMTP = orig })
+	})
+	t.Cleanup(stub.restore)
 
 	_, err := newMailer(config.Config{
 		SMTPHost: "smtp.example.com",
@@ -102,11 +156,10 @@ func TestNewMailerSMTPError(t *testing.T) {
 }
 
 func TestRunLoadConfigError(t *testing.T) {
-	orig := loadConfig
-	loadConfig = func() (config.Config, error) {
+	stub := newStubHelper(t).onLoadConfig(func() (config.Config, error) {
 		return config.Config{}, errors.New("load failed")
-	}
-	t.Cleanup(func() { loadConfig = orig })
+	})
+	t.Cleanup(stub.restore)
 
 	if err := run(context.Background(), slog.Default()); err == nil {
 		t.Fatal("expected error from run")
@@ -114,18 +167,14 @@ func TestRunLoadConfigError(t *testing.T) {
 }
 
 func TestRunOpenStoreError(t *testing.T) {
-	origLoad := loadConfig
-	origOpen := openStore
-	loadConfig = func() (config.Config, error) {
-		return config.Config{DatabaseURL: "postgres://example"}, nil
-	}
-	openStore = func(context.Context, string) (*store.Store, error) {
-		return nil, errors.New("open failed")
-	}
-	t.Cleanup(func() {
-		loadConfig = origLoad
-		openStore = origOpen
-	})
+	stub := newStubHelper(t).
+		onLoadConfig(func() (config.Config, error) {
+			return config.Config{DatabaseURL: "postgres://example"}, nil
+		}).
+		onOpenStore(func(context.Context, string) (*store.Store, error) {
+			return nil, errors.New("open failed")
+		})
+	t.Cleanup(stub.restore)
 
 	if err := run(context.Background(), slog.Default()); err == nil {
 		t.Fatal("expected error from run")
@@ -133,28 +182,22 @@ func TestRunOpenStoreError(t *testing.T) {
 }
 
 func TestRunMailerError(t *testing.T) {
-	origLoad := loadConfig
-	origOpen := openStore
-	origSMTP := newSMTP
-	loadConfig = func() (config.Config, error) {
-		return config.Config{
-			DatabaseURL: "postgres://example",
-			SMTPHost:    "smtp.example.com",
-			SMTPPort:    587,
-			SMTPFrom:    "no-reply@example.com",
-		}, nil
-	}
-	openStore = func(context.Context, string) (*store.Store, error) {
-		return &store.Store{}, nil
-	}
-	newSMTP = func(mailer.SMTPConfig) (*mailer.SMTPMailer, error) {
-		return nil, errors.New("smtp failed")
-	}
-	t.Cleanup(func() {
-		loadConfig = origLoad
-		openStore = origOpen
-		newSMTP = origSMTP
-	})
+	stub := newStubHelper(t).
+		onLoadConfig(func() (config.Config, error) {
+			return config.Config{
+				DatabaseURL: "postgres://example",
+				SMTPHost:    "smtp.example.com",
+				SMTPPort:    587,
+				SMTPFrom:    "no-reply@example.com",
+			}, nil
+		}).
+		onOpenStore(func(context.Context, string) (*store.Store, error) {
+			return &store.Store{}, nil
+		}).
+		onNewSMTP(func(mailer.SMTPConfig) (*mailer.SMTPMailer, error) {
+			return nil, errors.New("smtp failed")
+		})
+	t.Cleanup(stub.restore)
 
 	if err := run(context.Background(), slog.Default()); err == nil {
 		t.Fatal("expected error from run")
@@ -162,23 +205,17 @@ func TestRunMailerError(t *testing.T) {
 }
 
 func TestRunListenError(t *testing.T) {
-	origLoad := loadConfig
-	origOpen := openStore
-	origListen := listenAndServe
-	loadConfig = func() (config.Config, error) {
-		return config.Config{DatabaseURL: "postgres://example"}, nil
-	}
-	openStore = func(context.Context, string) (*store.Store, error) {
-		return &store.Store{}, nil
-	}
-	listenAndServe = func(*http.Server) error {
-		return errors.New("listen failed")
-	}
-	t.Cleanup(func() {
-		loadConfig = origLoad
-		openStore = origOpen
-		listenAndServe = origListen
-	})
+	stub := newStubHelper(t).
+		onLoadConfig(func() (config.Config, error) {
+			return config.Config{DatabaseURL: "postgres://example"}, nil
+		}).
+		onOpenStore(func(context.Context, string) (*store.Store, error) {
+			return &store.Store{}, nil
+		}).
+		onListenAndServe(func(*http.Server) error {
+			return errors.New("listen failed")
+		})
+	t.Cleanup(stub.restore)
 
 	if err := run(context.Background(), slog.Default()); err == nil {
 		t.Fatal("expected error from run")
@@ -186,31 +223,23 @@ func TestRunListenError(t *testing.T) {
 }
 
 func TestRunShutdownError(t *testing.T) {
-	origLoad := loadConfig
-	origOpen := openStore
-	origListen := listenAndServe
-	origShutdown := shutdownServer
-	loadConfig = func() (config.Config, error) {
-		return config.Config{DatabaseURL: "postgres://example"}, nil
-	}
-	openStore = func(context.Context, string) (*store.Store, error) {
-		return &store.Store{}, nil
-	}
 	stop := make(chan struct{})
-	listenAndServe = func(*http.Server) error {
-		<-stop
-		return http.ErrServerClosed
-	}
-	shutdownServer = func(*http.Server, context.Context) error {
-		close(stop)
-		return errors.New("shutdown failed")
-	}
-	t.Cleanup(func() {
-		loadConfig = origLoad
-		openStore = origOpen
-		listenAndServe = origListen
-		shutdownServer = origShutdown
-	})
+	stub := newStubHelper(t).
+		onLoadConfig(func() (config.Config, error) {
+			return config.Config{DatabaseURL: "postgres://example"}, nil
+		}).
+		onOpenStore(func(context.Context, string) (*store.Store, error) {
+			return &store.Store{}, nil
+		}).
+		onListenAndServe(func(*http.Server) error {
+			<-stop
+			return http.ErrServerClosed
+		}).
+		onShutdownServer(func(*http.Server, context.Context) error {
+			close(stop)
+			return errors.New("shutdown failed")
+		})
+	t.Cleanup(stub.restore)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
