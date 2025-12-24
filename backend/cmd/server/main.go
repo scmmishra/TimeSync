@@ -11,10 +11,9 @@ import (
 	"time"
 
 	"timesync/backend/internal/config"
+	"timesync/backend/internal/httpapi"
+	"timesync/backend/internal/mailer"
 	"timesync/backend/internal/store"
-
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
 )
 
 func main() {
@@ -32,21 +31,29 @@ func main() {
 	}
 	defer st.Close()
 
-	router := chi.NewRouter()
-	router.Use(middleware.RequestID)
-	router.Use(middleware.RealIP)
-	router.Use(middleware.Recoverer)
-	router.Use(middleware.Timeout(15 * time.Second))
+	var mailerSvc mailer.Mailer
+	if cfg.SMTPHost == "" {
+		mailerSvc = &mailer.LogMailer{}
+	} else {
+		smtpMailer, err := mailer.NewSMTP(mailer.SMTPConfig{
+			Host: cfg.SMTPHost,
+			Port: cfg.SMTPPort,
+			User: cfg.SMTPUser,
+			Pass: cfg.SMTPPass,
+			From: cfg.SMTPFrom,
+		})
+		if err != nil {
+			log.Fatal(err)
+		}
+		mailerSvc = smtpMailer
+	}
 
-	router.Get("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok"))
-	})
+	api := httpapi.New(st, mailerSvc)
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	srv := &http.Server{
 		Addr:         addr,
-		Handler:      router,
+		Handler:      api.Handler(),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  60 * time.Second,
