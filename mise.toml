@@ -1,0 +1,42 @@
+[tasks.run]
+dir = "backend"
+run = "go run ./cmd/server"
+
+[tasks.migrate-up]
+dir = "backend"
+run = "migrate -path migrations -database \"$DATABASE_URL\" up"
+
+[tasks.migrate-down]
+dir = "backend"
+run = "migrate -path migrations -database \"$DATABASE_URL\" down"
+
+[tasks.migrate-force]
+dir = "backend"
+run = "migrate -path migrations -database \"$DATABASE_URL\" force $VERSION"
+
+[tasks.sqlc]
+dir = "backend"
+run = "sqlc generate"
+
+[tasks.test]
+dir = "backend"
+env = { GOCACHE = "{{config_root}}/backend/.gocache", GOMODCACHE = "{{config_root}}/backend/.gomodcache" }
+run = "go test ./..."
+
+[tasks.test-short]
+dir = "backend"
+env = { GOCACHE = "{{config_root}}/backend/.gocache", GOMODCACHE = "{{config_root}}/backend/.gomodcache" }
+run = "go test -short ./..."
+
+[tasks.fmt]
+dir = "backend"
+run = "go fmt ./..."
+
+[tasks.lint]
+dir = "backend"
+run = "golangci-lint run"
+
+[tasks.cover]
+dir = "backend"
+env = { GOCACHE = "{{config_root}}/backend/.gocache", GOMODCACHE = "{{config_root}}/backend/.gomodcache" }
+run = "go test ./... -cover"
