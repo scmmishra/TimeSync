@@ -12,6 +12,8 @@ type Config struct {
 }
 
 func Load() (Config, error) {
+	_ = loadDotEnv(".env")
+
 	cfg := Config{
 		DatabaseURL: os.Getenv("DATABASE_URL"),
 		Port:        8080,
