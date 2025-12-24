@@ -709,12 +709,393 @@ func TestHandleVerifyCodeInvalidEmail(t *testing.T) {
 
 func TestHandleVerifyCodeInvalidFormat(t *testing.T) {
 	api := New(&stubStore{}, &mailer.LogMailer{}, Settings{}, nil)
-	body, _ := json.Marshal(verifyCodeRequest{Email: "user@example.com", Code: "ABCD2301"})
+	body, _ := json.Marshal(verifyCodeRequest{Email: "user@example.com", Code: "ABCD230!"})
 	req := httptest.NewRequest(http.MethodPost, "/auth/verify-code", bytes.NewReader(body))
 	req.Header.Set("X-Device-Id", "device-123")
 	rec := httptest.NewRecorder()
 
 	api.handleVerifyCode(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", rec.Code)
+	}
+}
+
+func TestHandleRequestCodeInvalidEmail(t *testing.T) {
+	api := New(&stubStore{}, &mailer.LogMailer{}, Settings{}, nil)
+	body, _ := json.Marshal(requestCodeRequest{Email: "bad-email"})
+	req := httptest.NewRequest(http.MethodPost, "/auth/request-code", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	api.handleRequestCode(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", rec.Code)
+	}
+}
+
+func TestHandleRequestCodeDBFailure(t *testing.T) {
+	q := stubQuerier{
+		createEmailVerificationCodeFn: func(context.Context, sqlc.CreateEmailVerificationCodeParams) (sqlc.EmailVerificationCode, error) {
+			return sqlc.EmailVerificationCode{}, errors.New("insert failed")
+		},
+	}
+	api := New(&stubStore{querier: q}, &mailer.LogMailer{}, Settings{
+		CodeTTL:                10 * time.Minute,
+		RequestCodeEmailLimit:  3,
+		RequestCodeEmailWindow: time.Minute,
+	}, nil)
+
+	body, _ := json.Marshal(requestCodeRequest{Email: "user@example.com"})
+	req := httptest.NewRequest(http.MethodPost, "/auth/request-code", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	api.handleRequestCode(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", rec.Code)
+	}
+}
+
+func TestHandleVerifyCodeInvalidBody(t *testing.T) {
+	api := New(&stubStore{}, &mailer.LogMailer{}, Settings{}, nil)
+	req := httptest.NewRequest(http.MethodPost, "/auth/verify-code", bytes.NewBufferString("{bad json"))
+	rec := httptest.NewRecorder()
+
+	api.handleVerifyCode(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", rec.Code)
+	}
+}
+
+func TestHandleVerifyCodeBeginTxFailure(t *testing.T) {
+	api := New(&stubStore{
+		beginTxFn: func(context.Context, pgx.TxOptions) (pgx.Tx, error) {
+			return nil, errors.New("begin failed")
+		},
+	}, &mailer.LogMailer{}, Settings{}, nil)
+
+	body, _ := json.Marshal(verifyCodeRequest{Email: "user@example.com", Code: "ABCD2345"})
+	req := httptest.NewRequest(http.MethodPost, "/auth/verify-code", bytes.NewReader(body))
+	req.Header.Set("X-Device-Id", "device-123")
+	rec := httptest.NewRecorder()
+
+	api.handleVerifyCode(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", rec.Code)
+	}
+}
+
+func TestHandleVerifyCodeLookupFailure(t *testing.T) {
+	q := stubQuerier{
+		getEmailVerificationCodeFn: func(context.Context, sqlc.GetEmailVerificationCodeParams) (sqlc.EmailVerificationCode, error) {
+			return sqlc.EmailVerificationCode{}, errors.New("db failed")
+		},
+	}
+
+	api := New(&stubStore{
+		querier: q,
+		beginTxFn: func(context.Context, pgx.TxOptions) (pgx.Tx, error) {
+			return &testTx{}, nil
+		},
+	}, &mailer.LogMailer{}, Settings{
+		VerifyCodeEmailLimit:  5,
+		VerifyCodeEmailWindow: 15 * time.Minute,
+		VerifyCodeLock:        15 * time.Minute,
+	}, nil)
+
+	body, _ := json.Marshal(verifyCodeRequest{Email: "user@example.com", Code: "ABCD2345"})
+	req := httptest.NewRequest(http.MethodPost, "/auth/verify-code", bytes.NewReader(body))
+	req.Header.Set("X-Device-Id", "device-123")
+	rec := httptest.NewRecorder()
+
+	api.handleVerifyCode(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", rec.Code)
+	}
+}
+
+func TestHandleVerifyCodeGetUserFailure(t *testing.T) {
+	q := stubQuerier{
+		getEmailVerificationCodeFn: func(context.Context, sqlc.GetEmailVerificationCodeParams) (sqlc.EmailVerificationCode, error) {
+			return sqlc.EmailVerificationCode{ID: pgtype.UUID{Bytes: [16]byte{1}, Valid: true}}, nil
+		},
+		markEmailVerificationCodeFn: func(context.Context, sqlc.MarkEmailVerificationCodeUsedParams) error {
+			return nil
+		},
+		getUserByEmailFn: func(context.Context, string) (sqlc.User, error) {
+			return sqlc.User{}, errors.New("db failed")
+		},
+	}
+
+	api := New(&stubStore{
+		querier: q,
+		beginTxFn: func(context.Context, pgx.TxOptions) (pgx.Tx, error) {
+			return &testTx{}, nil
+		},
+	}, &mailer.LogMailer{}, Settings{
+		VerifyCodeEmailLimit:  5,
+		VerifyCodeEmailWindow: 15 * time.Minute,
+		VerifyCodeLock:        15 * time.Minute,
+	}, nil)
+
+	body, _ := json.Marshal(verifyCodeRequest{Email: "user@example.com", Code: "ABCD2345"})
+	req := httptest.NewRequest(http.MethodPost, "/auth/verify-code", bytes.NewReader(body))
+	req.Header.Set("X-Device-Id", "device-123")
+	rec := httptest.NewRecorder()
+
+	api.handleVerifyCode(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", rec.Code)
+	}
+}
+
+func TestHandleVerifyCodeUpdateVerifiedFailure(t *testing.T) {
+	email := "user@example.com"
+	now := time.Now()
+
+	q := stubQuerier{
+		getEmailVerificationCodeFn: func(context.Context, sqlc.GetEmailVerificationCodeParams) (sqlc.EmailVerificationCode, error) {
+			return sqlc.EmailVerificationCode{ID: pgtype.UUID{Bytes: [16]byte{1}, Valid: true}}, nil
+		},
+		markEmailVerificationCodeFn: func(context.Context, sqlc.MarkEmailVerificationCodeUsedParams) error {
+			return nil
+		},
+		getUserByEmailFn: func(context.Context, string) (sqlc.User, error) {
+			return sqlc.User{ID: pgtype.UUID{Bytes: [16]byte{2}, Valid: true}, Email: email}, nil
+		},
+		updateUserVerifiedAtFn: func(context.Context, sqlc.UpdateUserVerifiedAtParams) (sqlc.User, error) {
+			return sqlc.User{}, errors.New("update failed")
+		},
+	}
+
+	api := New(&stubStore{
+		querier: q,
+		beginTxFn: func(context.Context, pgx.TxOptions) (pgx.Tx, error) {
+			return &testTx{}, nil
+		},
+	}, &mailer.LogMailer{}, Settings{
+		VerifyCodeEmailLimit:  5,
+		VerifyCodeEmailWindow: 15 * time.Minute,
+		VerifyCodeLock:        15 * time.Minute,
+	}, nil)
+	api.clock = func() time.Time { return now }
+
+	body, _ := json.Marshal(verifyCodeRequest{Email: email, Code: "ABCD2345"})
+	req := httptest.NewRequest(http.MethodPost, "/auth/verify-code", bytes.NewReader(body))
+	req.Header.Set("X-Device-Id", "device-123")
+	rec := httptest.NewRecorder()
+
+	api.handleVerifyCode(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", rec.Code)
+	}
+}
+
+func TestHandleVerifyCodeGetTeamFailure(t *testing.T) {
+	email := "user@example.com"
+
+	q := stubQuerier{
+		getEmailVerificationCodeFn: func(context.Context, sqlc.GetEmailVerificationCodeParams) (sqlc.EmailVerificationCode, error) {
+			return sqlc.EmailVerificationCode{ID: pgtype.UUID{Bytes: [16]byte{1}, Valid: true}}, nil
+		},
+		markEmailVerificationCodeFn: func(context.Context, sqlc.MarkEmailVerificationCodeUsedParams) error {
+			return nil
+		},
+		getUserByEmailFn: func(context.Context, string) (sqlc.User, error) {
+			return sqlc.User{ID: pgtype.UUID{Bytes: [16]byte{2}, Valid: true}, Email: email, EmailVerifiedAt: pgtype.Timestamptz{Time: time.Now(), Valid: true}}, nil
+		},
+		getTeamByDomainFn: func(context.Context, string) (sqlc.Team, error) {
+			return sqlc.Team{}, errors.New("db failed")
+		},
+	}
+
+	api := New(&stubStore{
+		querier: q,
+		beginTxFn: func(context.Context, pgx.TxOptions) (pgx.Tx, error) {
+			return &testTx{}, nil
+		},
+	}, &mailer.LogMailer{}, Settings{
+		VerifyCodeEmailLimit:  5,
+		VerifyCodeEmailWindow: 15 * time.Minute,
+		VerifyCodeLock:        15 * time.Minute,
+	}, nil)
+
+	body, _ := json.Marshal(verifyCodeRequest{Email: email, Code: "ABCD2345"})
+	req := httptest.NewRequest(http.MethodPost, "/auth/verify-code", bytes.NewReader(body))
+	req.Header.Set("X-Device-Id", "device-123")
+	rec := httptest.NewRecorder()
+
+	api.handleVerifyCode(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", rec.Code)
+	}
+}
+
+func TestHandleVerifyCodeCountMembersFailure(t *testing.T) {
+	email := "user@example.com"
+
+	q := stubQuerier{
+		getEmailVerificationCodeFn: func(context.Context, sqlc.GetEmailVerificationCodeParams) (sqlc.EmailVerificationCode, error) {
+			return sqlc.EmailVerificationCode{ID: pgtype.UUID{Bytes: [16]byte{1}, Valid: true}}, nil
+		},
+		markEmailVerificationCodeFn: func(context.Context, sqlc.MarkEmailVerificationCodeUsedParams) error {
+			return nil
+		},
+		getUserByEmailFn: func(context.Context, string) (sqlc.User, error) {
+			return sqlc.User{ID: pgtype.UUID{Bytes: [16]byte{2}, Valid: true}, Email: email, EmailVerifiedAt: pgtype.Timestamptz{Time: time.Now(), Valid: true}}, nil
+		},
+		getTeamByDomainFn: func(context.Context, string) (sqlc.Team, error) {
+			return sqlc.Team{ID: pgtype.UUID{Bytes: [16]byte{3}, Valid: true}, Domain: "example.com", Name: "example.com"}, nil
+		},
+		getTeamMembershipFn: func(context.Context, sqlc.GetTeamMembershipParams) (sqlc.TeamMembership, error) {
+			return sqlc.TeamMembership{}, pgx.ErrNoRows
+		},
+		countTeamMembersFn: func(context.Context, pgtype.UUID) (int64, error) {
+			return 0, errors.New("count failed")
+		},
+	}
+
+	api := New(&stubStore{
+		querier: q,
+		beginTxFn: func(context.Context, pgx.TxOptions) (pgx.Tx, error) {
+			return &testTx{}, nil
+		},
+	}, &mailer.LogMailer{}, Settings{
+		VerifyCodeEmailLimit:  5,
+		VerifyCodeEmailWindow: 15 * time.Minute,
+		VerifyCodeLock:        15 * time.Minute,
+	}, nil)
+
+	body, _ := json.Marshal(verifyCodeRequest{Email: email, Code: "ABCD2345"})
+	req := httptest.NewRequest(http.MethodPost, "/auth/verify-code", bytes.NewReader(body))
+	req.Header.Set("X-Device-Id", "device-123")
+	rec := httptest.NewRecorder()
+
+	api.handleVerifyCode(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", rec.Code)
+	}
+}
+
+func TestHandleVerifyCodeCreateMembershipFailure(t *testing.T) {
+	email := "user@example.com"
+
+	q := stubQuerier{
+		getEmailVerificationCodeFn: func(context.Context, sqlc.GetEmailVerificationCodeParams) (sqlc.EmailVerificationCode, error) {
+			return sqlc.EmailVerificationCode{ID: pgtype.UUID{Bytes: [16]byte{1}, Valid: true}}, nil
+		},
+		markEmailVerificationCodeFn: func(context.Context, sqlc.MarkEmailVerificationCodeUsedParams) error {
+			return nil
+		},
+		getUserByEmailFn: func(context.Context, string) (sqlc.User, error) {
+			return sqlc.User{ID: pgtype.UUID{Bytes: [16]byte{2}, Valid: true}, Email: email, EmailVerifiedAt: pgtype.Timestamptz{Time: time.Now(), Valid: true}}, nil
+		},
+		getTeamByDomainFn: func(context.Context, string) (sqlc.Team, error) {
+			return sqlc.Team{ID: pgtype.UUID{Bytes: [16]byte{3}, Valid: true}, Domain: "example.com", Name: "example.com"}, nil
+		},
+		getTeamMembershipFn: func(context.Context, sqlc.GetTeamMembershipParams) (sqlc.TeamMembership, error) {
+			return sqlc.TeamMembership{}, pgx.ErrNoRows
+		},
+		countTeamMembersFn: func(context.Context, pgtype.UUID) (int64, error) {
+			return 0, nil
+		},
+		createTeamMembershipFn: func(context.Context, sqlc.CreateTeamMembershipParams) error {
+			return errors.New("insert failed")
+		},
+	}
+
+	api := New(&stubStore{
+		querier: q,
+		beginTxFn: func(context.Context, pgx.TxOptions) (pgx.Tx, error) {
+			return &testTx{}, nil
+		},
+	}, &mailer.LogMailer{}, Settings{
+		VerifyCodeEmailLimit:  5,
+		VerifyCodeEmailWindow: 15 * time.Minute,
+		VerifyCodeLock:        15 * time.Minute,
+		TeamSizeLimit:         30,
+	}, nil)
+
+	body, _ := json.Marshal(verifyCodeRequest{Email: email, Code: "ABCD2345"})
+	req := httptest.NewRequest(http.MethodPost, "/auth/verify-code", bytes.NewReader(body))
+	req.Header.Set("X-Device-Id", "device-123")
+	rec := httptest.NewRecorder()
+
+	api.handleVerifyCode(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", rec.Code)
+	}
+}
+
+func TestHandleRefreshMissingToken(t *testing.T) {
+	api := New(&stubStore{}, &mailer.LogMailer{}, Settings{}, nil)
+	body, _ := json.Marshal(refreshRequest{RefreshToken: ""})
+	req := httptest.NewRequest(http.MethodPost, "/auth/refresh", bytes.NewReader(body))
+	req.Header.Set("X-Device-Id", "device-123")
+	rec := httptest.NewRecorder()
+
+	api.handleRefresh(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", rec.Code)
+	}
+}
+
+func TestHandleRefreshMissingDevice(t *testing.T) {
+	api := New(&stubStore{}, &mailer.LogMailer{}, Settings{}, nil)
+	body, _ := json.Marshal(refreshRequest{RefreshToken: "refresh-token"})
+	req := httptest.NewRequest(http.MethodPost, "/auth/refresh", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	api.handleRefresh(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", rec.Code)
+	}
+}
+
+func TestHandleRefreshInvalidBody(t *testing.T) {
+	api := New(&stubStore{}, &mailer.LogMailer{}, Settings{}, nil)
+	req := httptest.NewRequest(http.MethodPost, "/auth/refresh", bytes.NewBufferString("{bad json"))
+	rec := httptest.NewRecorder()
+
+	api.handleRefresh(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", rec.Code)
+	}
+}
+
+func TestHandleLogoutMissingToken(t *testing.T) {
+	api := New(&stubStore{}, &mailer.LogMailer{}, Settings{}, nil)
+	body, _ := json.Marshal(refreshRequest{RefreshToken: ""})
+	req := httptest.NewRequest(http.MethodPost, "/auth/logout", bytes.NewReader(body))
+	req.Header.Set("X-Device-Id", "device-123")
+	rec := httptest.NewRecorder()
+
+	api.handleLogout(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", rec.Code)
+	}
+}
+
+func TestHandleLogoutMissingDevice(t *testing.T) {
+	api := New(&stubStore{}, &mailer.LogMailer{}, Settings{}, nil)
+	body, _ := json.Marshal(refreshRequest{RefreshToken: "refresh-token"})
+	req := httptest.NewRequest(http.MethodPost, "/auth/logout", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	api.handleLogout(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected status 400, got %d", rec.Code)
