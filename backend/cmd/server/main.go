@@ -20,27 +20,38 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{}))
 	slog.SetDefault(logger)
 
-	cfg, err := config.Load()
-	if err != nil {
-		slog.Error("failed to load config", slog.Any("err", err))
-		os.Exit(1)
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	st, err := store.Open(ctx, cfg.DatabaseURL)
-	if err != nil {
-		slog.Error("failed to connect to database", slog.Any("err", err))
+	if err := run(ctx, logger); err != nil {
+		slog.Error("server error", slog.Any("err", err))
 		os.Exit(1)
+	}
+}
+
+var (
+	loadConfig     = config.Load
+	openStore      = store.Open
+	newServer      = buildServer
+	listenAndServe = func(srv *http.Server) error { return srv.ListenAndServe() }
+	shutdownServer = func(srv *http.Server, ctx context.Context) error { return srv.Shutdown(ctx) }
+)
+
+func run(ctx context.Context, logger *slog.Logger) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+
+	st, err := openStore(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
 	}
 	defer st.Close()
 
-	var mailerSvc mailer.Mailer
-	mailerSvc, err = newMailer(cfg)
+	mailerSvc, err := newMailer(cfg)
 	if err != nil {
-		slog.Error("failed to init smtp mailer", slog.Any("err", err))
-		os.Exit(1)
+		return err
 	}
 
 	settings := buildSettings(cfg)
@@ -48,29 +59,33 @@ func main() {
 	api := httpapi.New(st, mailerSvc, settings, logger)
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
-	srv := &http.Server{
-		Addr:         addr,
-		Handler:      api.Handler(),
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout:  60 * time.Second,
-	}
+	srv := newServer(addr, api.Handler())
 
+	errCh := make(chan error, 1)
 	go func() {
-		slog.Info("backend listening", slog.String("addr", addr))
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("server error", slog.Any("err", err))
-			os.Exit(1)
+		logger.Info("backend listening", slog.String("addr", addr))
+		if err := listenAndServe(srv); err != nil && err != http.ErrServerClosed {
+			errCh <- err
+			return
 		}
+		errCh <- nil
 	}()
 
-	<-ctx.Done()
+	select {
+	case <-ctx.Done():
+	case err := <-errCh:
+		if err != nil {
+			return err
+		}
+		return nil
+	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		slog.Error("server shutdown error", slog.Any("err", err))
+	if err := shutdownServer(srv, shutdownCtx); err != nil {
+		return err
 	}
+	return nil
 }
 
 var newSMTP = mailer.NewSMTP
@@ -106,5 +121,15 @@ func buildSettings(cfg config.Config) httpapi.Settings {
 		VerifyCodeIPWindow:     time.Duration(cfg.VerifyCodeIPWindow) * time.Minute,
 		RefreshDeviceLimit:     cfg.RefreshDeviceLimit,
 		RefreshDeviceWindow:    time.Duration(cfg.RefreshDeviceWindow) * time.Minute,
+	}
+}
+
+func buildServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:         addr,
+		Handler:      handler,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
 }

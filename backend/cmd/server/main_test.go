@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"log/slog"
+	"net/http"
 	"testing"
 	"time"
 
 	"timesync/backend/internal/config"
 	"timesync/backend/internal/mailer"
+	"timesync/backend/internal/store"
 )
 
 func TestBuildSettings(t *testing.T) {
@@ -94,5 +98,164 @@ func TestNewMailerSMTPError(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error from newMailer")
+	}
+}
+
+func TestRunLoadConfigError(t *testing.T) {
+	orig := loadConfig
+	loadConfig = func() (config.Config, error) {
+		return config.Config{}, errors.New("load failed")
+	}
+	t.Cleanup(func() { loadConfig = orig })
+
+	if err := run(context.Background(), slog.Default()); err == nil {
+		t.Fatal("expected error from run")
+	}
+}
+
+func TestRunOpenStoreError(t *testing.T) {
+	origLoad := loadConfig
+	origOpen := openStore
+	loadConfig = func() (config.Config, error) {
+		return config.Config{DatabaseURL: "postgres://example"}, nil
+	}
+	openStore = func(context.Context, string) (*store.Store, error) {
+		return nil, errors.New("open failed")
+	}
+	t.Cleanup(func() {
+		loadConfig = origLoad
+		openStore = origOpen
+	})
+
+	if err := run(context.Background(), slog.Default()); err == nil {
+		t.Fatal("expected error from run")
+	}
+}
+
+func TestRunMailerError(t *testing.T) {
+	origLoad := loadConfig
+	origOpen := openStore
+	origSMTP := newSMTP
+	loadConfig = func() (config.Config, error) {
+		return config.Config{
+			DatabaseURL: "postgres://example",
+			SMTPHost:    "smtp.example.com",
+			SMTPPort:    587,
+			SMTPFrom:    "no-reply@example.com",
+		}, nil
+	}
+	openStore = func(context.Context, string) (*store.Store, error) {
+		return &store.Store{}, nil
+	}
+	newSMTP = func(mailer.SMTPConfig) (*mailer.SMTPMailer, error) {
+		return nil, errors.New("smtp failed")
+	}
+	t.Cleanup(func() {
+		loadConfig = origLoad
+		openStore = origOpen
+		newSMTP = origSMTP
+	})
+
+	if err := run(context.Background(), slog.Default()); err == nil {
+		t.Fatal("expected error from run")
+	}
+}
+
+func TestRunListenError(t *testing.T) {
+	origLoad := loadConfig
+	origOpen := openStore
+	origListen := listenAndServe
+	loadConfig = func() (config.Config, error) {
+		return config.Config{DatabaseURL: "postgres://example"}, nil
+	}
+	openStore = func(context.Context, string) (*store.Store, error) {
+		return &store.Store{}, nil
+	}
+	listenAndServe = func(*http.Server) error {
+		return errors.New("listen failed")
+	}
+	t.Cleanup(func() {
+		loadConfig = origLoad
+		openStore = origOpen
+		listenAndServe = origListen
+	})
+
+	if err := run(context.Background(), slog.Default()); err == nil {
+		t.Fatal("expected error from run")
+	}
+}
+
+func TestRunShutdownError(t *testing.T) {
+	origLoad := loadConfig
+	origOpen := openStore
+	origListen := listenAndServe
+	origShutdown := shutdownServer
+	loadConfig = func() (config.Config, error) {
+		return config.Config{DatabaseURL: "postgres://example"}, nil
+	}
+	openStore = func(context.Context, string) (*store.Store, error) {
+		return &store.Store{}, nil
+	}
+	stop := make(chan struct{})
+	listenAndServe = func(*http.Server) error {
+		<-stop
+		return http.ErrServerClosed
+	}
+	shutdownServer = func(*http.Server, context.Context) error {
+		close(stop)
+		return errors.New("shutdown failed")
+	}
+	t.Cleanup(func() {
+		loadConfig = origLoad
+		openStore = origOpen
+		listenAndServe = origListen
+		shutdownServer = origShutdown
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := run(ctx, slog.Default()); err == nil {
+		t.Fatal("expected shutdown error from run")
+	}
+}
+
+func TestBuildServer(t *testing.T) {
+	srv := buildServer(":8080", http.NewServeMux())
+	if srv.Addr != ":8080" {
+		t.Fatalf("unexpected addr: %s", srv.Addr)
+	}
+	if srv.ReadTimeout != 10*time.Second || srv.WriteTimeout != 10*time.Second || srv.IdleTimeout != 60*time.Second {
+		t.Fatal("unexpected timeouts")
+	}
+	if srv.Handler == nil {
+		t.Fatal("expected handler to be set")
+	}
+}
+
+func TestBuildSettingsUsesValues(t *testing.T) {
+	cfg := config.Config{
+		AccessTTLMinutes:       1,
+		RefreshTTLHours:        2,
+		CodeTTLMinutes:         3,
+		RefreshGraceSeconds:    4,
+		TeamSizeLimit:          5,
+		RequestCodeEmailLimit:  6,
+		RequestCodeEmailWindow: 7,
+		RequestCodeIPLimit:     8,
+		RequestCodeIPWindow:    9,
+		VerifyCodeEmailLimit:   10,
+		VerifyCodeEmailWindow:  11,
+		VerifyCodeLockMinutes:  12,
+		VerifyCodeIPLimit:      13,
+		VerifyCodeIPWindow:     14,
+		RefreshDeviceLimit:     15,
+		RefreshDeviceWindow:    16,
+	}
+	settings := buildSettings(cfg)
+	if settings.TeamSizeLimit != 5 || settings.RequestCodeIPLimit != 8 || settings.RefreshDeviceLimit != 15 {
+		t.Fatal("settings not mapped correctly")
+	}
+	if settings.AccessTTL != time.Minute || settings.RefreshTTL != 2*time.Hour || settings.CodeTTL != 3*time.Minute {
+		t.Fatal("settings durations not mapped correctly")
 	}
 }
